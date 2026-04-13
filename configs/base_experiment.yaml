@@ -1,0 +1,25 @@
+experiment_name: deepsleepnet_baseline
+
+dataset:
+  name: sleep_edf
+  raw_dir: data/raw
+  processed_dir: data/processed
+  label_set: [W, N1, N2, N3, REM]
+  epoch_seconds: 30
+  split_mode: cross_subject
+
+model:
+  name: deepsleepnet_baseline
+
+training:
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.001
+  seed: 42
+
+evaluation:
+  metrics: [accuracy, macro_f1, cohen_kappa]
+  save_confusion_matrix: true
+
+output:
+  result_dir: results/deepsleepnet_baseline

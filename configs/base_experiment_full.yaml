@@ -1,0 +1,27 @@
+experiment_name: deepsleepnet_stage1_full
+
+dataset:
+  name: sleep_edf
+  raw_dir: data/raw/sleep_edf_sleep_cassette
+  processed_dir: data/processed/sleep_edf_sleep_cassette
+  label_set: [W, N1, N2, N3, REM]
+  epoch_seconds: 30
+  split_mode: cross_subject
+
+model:
+  name: deepsleepnet_baseline
+
+training:
+  batch_size: 128
+  epochs: 50
+  learning_rate: 0.001
+  seed: 42
+  num_workers: 8
+  pin_memory: true
+
+evaluation:
+  metrics: [accuracy, macro_f1, cohen_kappa]
+  save_confusion_matrix: true
+
+output:
+  result_dir: results/deepsleepnet_stage1_full

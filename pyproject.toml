@@ -1,0 +1,23 @@
+[project]
+name = "eeg-sleep"
+version = "0.1.0"
+description = "DeepSleepNet 复现项目骨架"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mne>=1.8",
+    "numpy>=1.26",
+    "PyYAML>=6.0",
+    "scikit-learn>=1.5",
+    "torch>=2.3",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+eeg-sleep = "eeg_sleep.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

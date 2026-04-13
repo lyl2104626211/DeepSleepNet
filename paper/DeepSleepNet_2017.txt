@@ -1,0 +1,784 @@
+                                          THIS ARTICLE HAS BEEN PUBLISHED IN IEEE TRANSACTIONS ON NEURAL SYSTEMS AND REHABILITATION ENGINEERING.                                1
+
+
+
+
+                                           DeepSleepNet: a Model for Automatic Sleep Stage
+                                              Scoring based on Raw Single-Channel EEG
+                                                                             Akara Supratak, Hao Dong, Chao Wu, and Yike Guo*
+
+
+
+
+                                             Abstract—The present study proposes a deep learning model,         and time-consuming due to the need for PSG recordings from
+                                          named DeepSleepNet, for automatic sleep stage scoring based on        several sensors attached to subjects over several nights.
+                                          raw single-channel EEG. Most of the existing methods rely on             There have been a number of studies trying to develop a
+                                          hand-engineered features which require prior knowledge of sleep
+arXiv:1703.04046v2 [stat.ML] 3 Aug 2017
+
+
+
+
+                                          analysis. Only a few of them encode the temporal information          method to automate sleep stage scoring based on multiple
+                                          such as transition rules, which is important for identifying the      signals such as EEG, EOG and EMG [4]–[6], or single-channel
+                                          next sleep stages, into the extracted features. In the proposed       EEG [7]–[9]. These methods firstly extract time-domain,
+                                          model, we utilize Convolutional Neural Networks to extract time-      frequency-domain and time-frequency-domain features from
+                                          invariant features, and bidirectional-Long Short-Term Memory          each recording epoch. In the case of multiple signals, the
+                                          to learn transition rules among sleep stages automatically from
+                                          EEG epochs. We implement a two-step training algorithm to train       features from all signals in one epoch were concatenated
+                                          our model efficiently. We evaluated our model using different         into one feature vector. The features are then used to train
+                                          single-channel EEGs (F4-EOG(Left), Fpz-Cz and Pz-Oz) from             classifiers to identify the sleep stage of the epoch. However,
+                                          two public sleep datasets, that have different properties (e.g.,      we believe that these methods may well not generalize to a
+                                          sampling rate) and scoring standards (AASM and R&K). The              larger population due to the heterogeneity among subjects and
+                                          results showed that our model achieved similar overall accuracy
+                                          and macro F1-score (MASS: 86.2%-81.7, Sleep-EDF: 82.0%-76.9)          recording hardware. This is because these features were hand-
+                                          compared to the state-of-the-art methods (MASS: 85.9%-80.5,           engineered based on the characteristics of the available dataset.
+                                          Sleep-EDF: 78.9%-73.7) on both datasets. This demonstrated               Recently, deep learning, a branch of machine learning that
+                                          that, without changing the model architecture and the training        utilizes multiple layers of linear and non-linear processing
+                                          algorithm, our model could automatically learn features for           units to learn hierarchical representations or features from
+                                          sleep stage scoring from different raw single-channel EEGs from
+                                          different datasets without utilizing any hand-engineered features.    input data, has been employed in sleep stage scoring. For
+                                          Our code is publicly available at https://github.com/akaraspt/        instance, the authors in [10] have investigated a capability of
+                                          deepsleepnet. The final version of this paper can be found in         Deep Belief Nets (DBNs) to learn probabilistic representations
+                                          http://ieeexplore.ieee.org/document/7961240/.                         from preprocessed raw PSG. Convolutional Neural Networks
+                                            Index Terms—Sleep Stage Scoring, Deep Learning, Single-             (CNNs) have also been applied to learn multiple filters that
+                                          channel EEG.                                                          are used to convolve with small portions of input data (i.e.,
+                                                                                                                convolution) to extract time-invariant features from raw Fpz-
+                                                                                                                Cz EEG channel [11]. However, the results from the litera-
+                                                                 I. I NTRODUCTION                               ture showed that applying deep learning on hand-engineered
+                                               LEEP plays an important role in human health. Being able         features performed better than on raw signals [7], [10]. This
+                                          S    to monitor how well people sleep has a significant impact
+                                          on medical research and practice [1].
+                                                                                                                might well be because the authors did not consider temporal
+                                                                                                                information that sleep experts use when they determine the
+                                             Typically, sleep experts determine the quality of sleep            sleep stage of each epoch.
+                                          using electrical activity recorded from sensors attached to              Only a few number of literature have explored Recurrent
+                                          different parts of the body. A set of signals from these              Neural Networks (RNNs) in sleep stage scoring. RNNs are
+                                          sensors is called a polysomnogram (PSG), consisting of an             capable of conditioning outputs on all previous inputs, as
+                                          electroencephalogram (EEG), an electrooculogram (EOG), an             they maintain internal memory and utilizes feedback (or loop)
+                                          electromyogram (EMG), and an electrocardiogram (ECG).                 connections to learn temporal information from sequences of
+                                          This PSG is segmented into 30-s epochs, which are then be             inputs. The main advantage of RNNs is that they can be trained
+                                          classified into different sleep stages by the experts according to    to learn long-term dependencies such as transition rules [3]
+                                          sleep manuals such as the Rechtschaffen and Kales (R&K) [2]           that sleep experts use to identify the next possible sleep stages
+                                          and the American Academy of Sleep Medicine (AASM) [3].                from a sequence of PSG epochs. Elman RNNs have been
+                                          This process is called sleep stage scoring or sleep stage clas-       applied on energy features from the Fpz-Cz EEG channel [12].
+                                          sification. This manual approach is, however, labor-intensive         In our previous work [13], we also applied Long Short-Term
+                                                                                                                Memory (LSTM) on time-frequency-domain features from the
+                                            A. Supratak, H. Dong, C. Wu and Y. Guo are with the Department      F4-EOG and Fp2-EOG channels separately. Even though the
+                                          of Computing, Imperial College London, London, SW7 2AZ, UK (e-mail:   reported results were promising, these methods still rely on
+                                          {as12212, hao.dong11, chao.wu, y.guo}@ic.ac.uk)                       hand-engineered features.
+                                            * Corresponding author
+                                            DOI: 10.1109/TNSRE.2017.2721116                                        This paper introduces DeepSleepNet, a model for automatic
+                                            Copyright has been transferred to IEEE                              sleep stage scoring based on raw single-channel EEG, which
+2                         THIS ARTICLE HAS BEEN PUBLISHED IN IEEE TRANSACTIONS ON NEURAL SYSTEMS AND REHABILITATION ENGINEERING.
+
+
+
+is different from the existing works that develop algorithms to                                                                 30-s EEG epoch
+extract features from EEG. We aim to automate the process
+of hand-engineering features by utilizing the feature extraction
+capabilities of deep learning. The main contributions of this                                             [Fs/2] conv, 64, /[Fs/16]         [Fs×4] conv, 64, /[Fs/2]
+work are as follows:
+   • We develop a new model architecture that utilizes two                                                     8 max-pool, /8                   4 max-pool, /4
+      CNNs with different filter sizes at the first layers and
+      bidirectional-LSTMs. The CNNs can be trained to learn                                                     0.5 dropout                      0.5 dropout
+
+
+
+
+                                                                             Representation Learning
+      filters to extract time-invariant features from raw single-
+      channel EEG, while the bidirectional-LSTMs can be                                                         8 conv, 128                       6 conv, 128
+      trained to encode temporal information such as sleep
+      stage transition rules into the model.                                                                    8 conv, 128                       6 conv, 128
+   • We implement a two-step training algorithm that can ef-
+      fectively train our model end-to-end via backpropagation,                                                 8 conv, 128                       6 conv, 128
+      while preventing the model from suffering class imbal-
+      ance problem (i.e., learning to classify only the majority                                               4 max-pool, /4                   2 max-pool, /2
+      of sleep stages) presented in a large sleep dataset.
+   • We show that, without changing the model architecture
+      and the training algorithm, our model could automatically                                                                  0.5 dropout
+      learn features for sleep stage scoring from different
+      raw single-channel EEGs from two datasets, that have
+      different properties (e.g., sampling rate) and scoring                                                               512/512 bidirect-lstm           1024 fc
+      standards (AASM and R&K), without utilizing any hand-
+      engineered features.                                                   Sequence Residual Learning                          0.5 dropout
+
+
+                      II. D EEP S LEEP N ET                                                                                512/512 bidirect-lstm
+   The architecture of DeepSleepNet consists of two main parts
+as shown in Fig. 1. The first part is representation learning,                                                                   0.5 dropout
+which can be trained to learn filters to extract time-invariant
+features from each of raw single-channel EEG epochs. The
+second part is sequence residual learning, which can be trained
+                                                                                                                                        +
+to encode the temporal information such as stage transition
+                                                                                                                                 0.5 dropout
+rules [3] from a sequence of EEG epochs in the extracted
+features. This architecture is designed for scoring 30-s EEG
+epochs following the standard of AASM and R&K manuals.                                                                            5 softmax
+
+
+A. Representation Learning                                                                                                       Sleep Stage
+
+   We employ two CNNs with small and large filter sizes at the
+                                                                                                                                                      Element-wise
+first layers to extract time-invariant features from raw single-                                             Trainable Layer
+                                                                                                                                                      Operation
+channel 30-s EEG epochs. This architecture is inspired by the
+way signal processing experts control the trade-off between                                                  Non-trainable Layer                      Concatenate
+temporal and frequency precision in their feature extraction
+algorithms [14]. The small filter is better to capture temporal
+                                                                                                             Non-trainable Layer                      Copy
+information (i.e., when certain of EEG patterns appear), while                                               (included only training)
+the larger filter is better to capture frequency information (i.e.,
+frequency components).                                                Fig. 1. An overview architecture of DeepSleepNet consisting of two main
+   In our model, each CNN consists of four convolutional              parts: representation learning and sequence residual learning. Each trainable
+layers and two max-pooling layers. Each convolutional layer           layer is a layer containing parameters to be optimized during a training
+                                                                      process. The specifications of the first convolutional layers of the two CNNs
+performs three operations sequentially: 1D-convolution with           depends on the sampling rate (Fs) of the EEG data (see Section II-C).
+its filters, batch normalization [15], and applying the rectified
+linear unit (ReLU) activation (i.e., relu(x) = max(0, x)).
+Each pooling layer downsamples inputs using max operation.               Formally, suppose there are N 30-s EEG epochs
+The specifications of the filter sizes, the number of filters,        {x1 , ..., xN } from single-channel EEG. We use the two CNNs
+stride sizes and pooling sizes can be found in Fig. 1. Each conv      to extract the i-th feature ai from the i-th EEG epoch xi as
+block shows a filter size, the number of filters, and a stride        follows:
+size. Each max-pool block shows a pooling size and a stride
+size. We will explain dropout blocks later in Section III-C.                                                        hsi    =       CN Nθs (xi )                        (1)
+SUPRATAK et al.: DEEPSLEEPNET: A MODEL FOR AUTOMATIC SLEEP STAGE SCORING BASED ON RAW SINGLE-CHANNEL EEG                                 3
+
+
+
+                        hli   =    CN Nθl (xi )               (2)    vectors; F C represents a function that transform features at
+                        ai    =    hsi ||hli                  (3)    into a vector that can be added (element-wise) with the con-
+                                                                     catenated output vector hft ||hbt from the bidirectional-LSTMs.
+where CN N (xi ) is a function that transform a 30-s EEG             The specifications of the hidden size of forward and backward
+epoch xi into a feature vector hi using a CNN, θs and                LSTMs, and the fully-connected layers can be found in Fig. 1.
+θl are parameters of the CNNs with small and large filter            Each bidirect-lstm block shows hidden sizes of forward and
+sizes in the first layer respectively, and || is a concatenate       backward LSTMs. Each fc block shows a hidden size.
+operation that combines the outputs from two CNNs together.             It should be noted that the hidden and cell states hft , hbt , cft
+These concatenated or linked features {a1 , ..., aN } are then       and cbt in (4) and (5) will be re-initialized to zeros at the
+forwarded to the sequence residual learning part.                    beginning of each patient data during the training and testing.
+                                                                     This is to make sure that the model uses only temporal
+B. Sequence Residual Learning                                        information from the current subject data for both training
+   We apply the residual learning framework [16] to design           and testing.
+our sequence residual learning part. This part consists of two
+main components: bidirectional-LSTMs [17] and a shortcut
+connection (see Fig. 1).                                             C. Model Specification
+   We employ two layers of bidirectional-LSTMs to learn
+temporal information such as stage transition rules [3] which           For the representation learning part, the parameters of the
+sleep experts use to determine the next possible sleep stages        CNN-1 and CNN-2 were selected with the aim to capture
+based on the previous stages. For instance, the AASM manual          temporal and frequency information from the EEG according
+suggests that if a subject is in sleep stage N2, continue to         to the guideline provided by [14]. For instance, in Fig. 1,
+score epochs with low amplitude and mixed frequency EEG              the filter size of the conv1 layers of the CNN-1 was set
+activity as N2 even though K complexes or sleep spindles are         to Fs/2 (i.e., half of the sampling rate (Fs)), and its stride
+not present. In this case, the bidirectional-LSTMs can learn         size was set to Fs/16 to detect when certain of EEG patterns
+to remember that it has seen the stage N2, and continue to           appear. On the other hand, the filter size of the conv1 layer of
+score successive epochs as N2 if they still detect the low           the CNN-2 was set to Fs×4 to better capture the frequency
+amplitude and mixed frequency EEG activity. Bidirectional-           components from the EEG. Its stride size was also set to
+LSTMs extends the LSTM [18] by having two LSTMs process              Fs/2, which is higher than the conv1 layer of the CNN-1, as
+forward and backward input sequences independently [17]. In          it is not necessary to perform a fine-grained convolution to
+other words, the outputs from forward and backward LSTMs             extract frequency components. The filter and stride sizes of
+are not connected to each other. The model is therefore able         the subsequent convolutional layers conv2 [1-3] were chosen
+to exploit information both from the past and the future. We         to be small fix sizes. It is believed that the use of multiple
+also use peephole connections [19], [20] in our LSTMs which          convolutional layers with a small filter size instead of a single
+allow their gating mechanism to inspect their current memory         convolutional layer with a large filter can reduce the number
+cell before the modification.                                        of parameters and the computational cost, and can still achieve
+   We use a shortcut connect to reformulate the computation          the similar level of model expressiveness [21].
+of this part into a residual function. This enables our model to        For the sequence residual learning part, the parameters of
+be able to add temporal information it learns from the previous      the bidirect-lstm and fc layers were set to be smaller than the
+input sequences into the feature extracted from the CNNs. We         output of the representation learning part, which is 1024 in
+also use a fully-connected layer in the shortcut connection to       Fig. 1. This is to restrict our model to select and combine
+transform the features from the CNNs into a vector that can          only the important features to prevent overfitting.
+be added to the output from the LSTMs. This layer performs
+matrix multiplication with its weight parameters, batch nor-
+malization, and applying the ReLU activation sequentially.                      III. T WO -S TEP T RAINING A LGORITHM
+   Formally, suppose there are N features from the CNNs
+{a1 , ..., aN } arranged sequentially and t = 1...N denotes the         The two-step training algorithm (see Algorithm 1) is a tech-
+time index of 30-s EEG epochs, our sequence residual learning        nique we develop to effectively train our model end-to-end via
+is defined as follows:                                               backpropagation, while preventing the model from suffering
+                                                                     class imbalance problem (i.e., learning to classify only the
+            hft , cft    =    LST Mθf (hft−1 , cft−1 , at )   (4)    majority of sleep stages) present in a large sleep dataset. The
+            hbt , cbt    =    LST Mθb (hbt+1 , cbt+1 , at )   (5)    algorithm first pre-trains the representation learning part of the
+                                                                     model and then fine-tunes the whole model using two different
+                  ot     =    hft ||hbt + F Cθ (at )          (6)
+                                                                     learning rates. We use the cross-entropy loss to quantify the
+where LST M represents a function that processes sequences           agreement between the predicted and the target sleep stages in
+of features at using the two-layers LSTM parameterized by            both of these training steps. The combination of the softmax
+θf and θb for forward and backward directions; h and c are           function (i.e., the last layer in Fig. 1) and the cross-entropy
+vectors of hidden and cell states of the LSTMs; hf0 , cf0 , hbN +1   loss are used to train our model to output probabilities for
+and cbN +1 of forward and backward LSTMs are set to zero             mutually exclusive classes.
+4                        THIS ARTICLE HAS BEEN PUBLISHED IN IEEE TRANSACTIONS ON NEURAL SYSTEMS AND REHABILITATION ENGINEERING.
+
+
+
+A. Pre-training                                                    Algorithm 1 Two-step Training
+   The first step is to perform a supervised pre-training on       Input: init model, data
+the representation learning part of the model with a class-        Output: model
+balance training set so that the model does not overfit to the         Initialization:
+                                                                    1: init CN Nθs ,θl ← extract cnns(init model)
+majority of sleep stages. This can be seen in Algorithm 1,
+                                                                    2: pre model ← stack(init CN Nθs ,θl , sof tmax)
+lines 1-8. Specifically, the two CNNs are extracted from the
+                                                                    3: dataover ← oversample(data)
+model and then stacked with a softmax layer, sof tmax. It is
+important to note that this sof tmax is different from the last        Pre-training Step:
+                                                                    4: for i = 1 to n pretrain epochs do
+layer in the model (see Fig. 1). This stacked softmax layer is
+only used in this step to pre-train the two CNNs, in which          5:    for each batch in shuf f le(dataover ) do
+its parameters are discarded at the end of the pre-training. We     6:       pre model ← adamlr (pre model, batch)
+denote these two CNNs stacked with sof tmax as pre model.           7:    end for
+                                                                    8: end for
+Then the pre model is trained with a class-balance training set
+using a mini-batch gradient-based optimizer called Adam [22]           Fine-tuning Step:
+                                                                    9: pre CN Nθs ,θl ← extract cnns(pre model)
+with a learning rate, lr. At the end of the pre-training, the
+                                                                   10: model ← replace cnns(init model, pre CN Nθs ,θl )
+softmax layer is discarded. The class-balance training set is
+                                                                   11: for i = 1 to n f inetune epochs do
+obtained from duplicating the minority sleep stages in the
+original training set such that all sleep stage have the same      12:    for each subject in data do
+number of samples (i.e., oversampling).                            13:       model ← reset lstm cell state(model)
+                                                                   14:       subject dataseq ← arrange sequence(subject)
+                                                                   15:       for each batch in subject dataseq do
+B. Fine-tuning                                                     16:          model ← adamlr1 ,lr2 (model, batch)
+   The second step is to perform a supervised fine-tuning on       17:       end for
+the whole model with a sequential training set. This can be        18:    end for
+seen in Algorithm 1, lines 9-19. This step is to encode the        19: end for
+stage transition rules into the model as well as to perform        20: return model
+necessary adjustments on the pre-trained CNNs. Specifically,
+the parameters θs and θl of the two CNNs of init model
+are replaced with the ones from the pre model, resulting in        and were removed from the model during testing to provide
+model. Then the model is trained with the sequence training        deterministic outputs.
+set using a mini-batch Adam optimizer with two different              The second technique was L2 weight decay, which adds
+learning rates, lr1 and lr2 . As the CNNs part has already been    a penalty term into a loss function to prevent large values
+pre-trained, we, therefore, use a lower learning rate lr1 for      of the parameters in the model (i.e., exploding gradients).
+the CNNs part and a higher learning rate lr2 for the sequence      We only applied the weight decay on the first layers of the
+residual learning part, and a softmax layer. We found that when    two CNNs because of the two main reasons. Firstly, it is
+we used the same learning rate to fine-tune the whole network,     pointed out in [23] that L2 weight decay can limit the model
+the pre-trained CNN parameters were excessively adjusted           capabilities of learning long-term dependencies. Secondly, we
+to the sequential data, which were not class-balanced. As a        found that, without weight decay, the filters of the first layers
+consequence, the model started to overfit to the majority of       of the CNNs overfitted to noises or artifacts in EEG data.
+the sleep stages toward the end of the fine-tuning. Therefore,     This weight decay helped the model learn smoother filters
+two different learning rates are used during fine-tuning. Also,    (i.e., containing less high-frequency elements) which resulted
+we use a heuristic gradient clipping technique to prevent          in slightly performance gains. The weight decay parameter
+the exploding gradients, which is a well-known problem             that defines the degree of penalty, lambda, was set to 10−3 .
+when training RNNs such as LSTMs [23]. This technique
+rescales the gradients to smaller values using their global norm                            IV. R ESULTS
+whenever they exceed a pre-defined threshold. The sequential
+                                                                   A. Data
+training set is obtained by arranging the original training set
+sequentially according to time across all subjects.                   We evaluated our model using different EEG channels
+                                                                   from two public datasets: Montreal Archive of Sleep Studies
+                                                                   (MASS) [26] and Sleep-EDF [27], [28].
+C. Regularization                                                     MASS. In MASS cohort 1, there were five subsets of
+   We employed two regularization techniques to help prevent       recordings, SS1-SS5, which were organized according to their
+overfitting problems. The first technique was dropout [24], [25]   research and acquisition protocols. We used data from SS3,
+that randomly sets the input values to 0 (i.e., dropping units     which contained PSG recordings from 62 healthy subjects
+along with their connection) with the specified probability        (age 42.5±18.9). Each recording contained 20 scalp-EEG, 2
+during training. Dropout layers with the probability of 0.5 were   EOG (left and right), 3 EMG and 1 ECG channels. The EEG
+used throughout the model as shown in Fig. 1. It is important      electrodes were positioned according to the international 10-
+to note that these dropout layers were used for training only,     20 system, and the EOG electrodes were positioned diagonally
+SUPRATAK et al.: DEEPSLEEPNET: A MODEL FOR AUTOMATIC SLEEP STAGE SCORING BASED ON RAW SINGLE-CHANNEL EEG                          5
+
+
+
+                            TABLE I                                 macro-averaging F1-score (MF1), overall accuracy (ACC), and
+N UMBER OF 30- S EPOCHS FOR EACH SLEEP STAGE FROM TWO DATASETS      Cohen’s Kappa coefficient (κ) [30], [31]. The per-class metrics
+   Dataset      W      N1      N2     N3 (N4)   REM      Total
+                                                                    are computed by considering a single class as a positive class,
+   MASS        6227   4724   29534     7651     10464   58600
+                                                                    and all other classes combined as a negative class. The MF1
+   Sleep-EDF   7927   2804   17799     5703      7717   41950       and ACC are calculated as follows:
+                                                                                                    PC
+                                                                                                       c=1 TPc
+                                                                                       ACC =                                    (7)
+on the outer edges of the eyes. EEG and EOG recordings were                                              N
+                                                                                                    PC
+pre-processed with a notch filter of 60 Hz, and band-pass filters                                      c=1 F1c
+                                                                                       MF1 =                                    (8)
+of 0.30-100 Hz (EEG) and 0.10-100 Hz (EOG). All EEG and                                                  C
+EOG recordings had the same sampling rate of 256 Hz. These          where TPc is the true positives of class c, F1c is per-class
+recordings were manually classified into one of the five sleep      F1-score of class c, C is the number of sleep stages, and N
+stages (W, N1, N2, N3 and REM) by a sleep expert according          is the total number of test epochs.
+to the AASM standard [3]. There were also movement artifacts
+at the beginning and the end of each subject’s recordings that
+were labeled as UNKNOWN. We evaluated our model using               D. Training Parameters
+the F4-EOG (Left) channel, which was obtained via montage
+                                                                       The representation learning part was pre-trained using the
+reformatting [29] without any further pre-processing.
+                                                                    oversampled training set with the mini-batch size of 100. The
+   Sleep-EDF. There were two sets of subjects from two
+                                                                    Adam optimizer’s parameters lr, beta1, and beta2 were set
+studies: age effect in healthy subjects (SC) and Temazepam
+                                                                    to 10−4 , 0.9 and 0.999 respectively. Then the whole model
+effects on sleep (ST). We used 20 subjects (age 28.7±2.9)
+                                                                    was fine-tuned using the sequential training set. Specifically,
+from SC. Each PSG recording contained 2 scalp-EEG signals
+                                                                    we equally split the sequences of 30-s EEG epochs from each
+from Fpz-Cz and Pz-Cz channels, 1 EOG (horizontal), 1 EMG,
+                                                                    subject data into 10 sub-sequences (i.e., batch size was 10).
+and 1 oro-nasal respiration signal. All EEG and EOG had
+                                                                    Then we fed 25 epochs (i.e., sequence length was 25) from
+the same sampling rate of 100 Hz. These recordings were
+                                                                    each sub-sequence yielding 250 epochs per one step training.
+manually classified into one of the eight classes (W, N1, N2,
+                                                                    The Adam optimizer’s parameters were similar to the pre-
+N3, N4, REM, MOVEMENT, UNKNOWN) by sleep experts
+                                                                    training step except that the learning rate of each part of the
+according to the R&K standard [2]. We evaluated our model
+                                                                    model, lr1 and lr2, were set to 10−6 and 10−4 respectively.
+using the Fpz-Cz and Pz-Cz channels without any further pre-
+                                                                    The threshold of the gradient clipping was set to 10. The
+processing. We also merged the N3 and N4 stages into a
+                                                                    numbers of epochs for the pre-training and the fine-tuning
+single stage N3 to use the same AASM standard as the MASS
+                                                                    steps were set to 100 and 200 respectively. There was no
+dataset. There were long periods of awake or stage W at the
+                                                                    early stopping as there was no validation set in our evaluation
+start and the end of each recording, in which a subject was
+                                                                    scheme.
+not sleeping. We only included 30 minutes of such periods
+just before and after the sleep periods, as we were interested         For the batch normalization in conv and fc blocks, the 
+in sleep periods.                                                   constant of 10−5 was added to the mini-batch variance for
+   We excluded MOVEMENT and UNKNOWN (which were                     numerical stability. The mean and variance of the training
+at the start or the end of the each recording) stages, as they      set, which were used as fixed parameters during testing, were
+did not belong to the five sleep stages [3]. Table I summarizes     estimated by computing the moving average of with a decay
+the number of 30-s epochs for each sleep stage from these two       rate of 0.999 from the sampling mean and variance of each
+datasets.                                                           mini-batch.
+
+
+B. Experimental Design                                              E. Implementation
+   We evaluated our model using a k-fold cross-validation
+                                                                       We implemented our model using TensorLayer (https://
+scheme, where k was set to 31 and 20 for the MASS and
+                                                                    github.com/zsdonghao/tensorlayer), which is a deep learning
+Sleep-EDF datasets respectively. Specifically, in each fold, we
+                                                                    library extended from Google Tensorflow [32]. This library
+used recordings from Ns −(Ns /k) to train the model, and from
+                                                                    allows us to deploy numerical computation such as the training
+the remaining Ns /k subjects to test the trained model, where
+                                                                    and validation tasks to multiple CPUs and GPUs. We ran
+Ns is the number of subjects in the dataset. This process was
+                                                                    the k-fold cross-validation using the eTRIKS Analytical En-
+repeated k times so that all of the recordings were tested. Then
+                                                                    vironment (eAE) (https://eae.doc.ic.ac.uk/), which provides a
+we combined the predicted sleep stages from all folds and
+                                                                    cluster of high-performance computing nodes. Each node was
+computed the performance metrics, which will be discussed
+                                                                    equipped with an NVIDIA GeForce GTX 980. The training
+in Section IV-C.
+                                                                    time for each validation fold was approximately 3 hours on
+                                                                    each node. The testing or prediction time for each batch of 25
+C. Performance Metrics                                              EEG epochs (according to the sequence length specified during
+  We evaluated the performance of our model using per-class         training in Section IV-D) was approximately 50 milliseconds
+precision (PR), per-class recall (RE), per-class F1-score (F1),     on each node.
+6                         THIS ARTICLE HAS BEEN PUBLISHED IN IEEE TRANSACTIONS ON NEURAL SYSTEMS AND REHABILITATION ENGINEERING.
+
+
+
+F. Initial Experiments                                                                          TABLE II
+                                                                     C ONFUSION MATRIX OBTAINED FROM 31- FOLD CROSS - VALIDATION ON
+   We initially conducted experiments with the first fold of the            F4-EOG (L EFT ) CHANNEL FROM THE MASS DATASET
+31-fold cross-validation with the MASS dataset. This was to
+design the architecture and the parameters for DeepSleepNet.                               Predicted                  Per-class Metrics
+For model architecture, we tried several configurations such                  W      N1       N2       N3     REM    PR      RE      F1
+as increasing/decreasing convolutional layers, changing the           W      5433   572      107        13     102   87.3   87.2   87.3
+number of filters and the stride sizes, and changing the number       N1      452   2802     827         4     639   60.4   59.3   59.8
+of hidden sizes in the bidirectional-LSTMs and the fully-             N2      185   906     26786      1158   499    89.9   90.7   90.3
+connected layer. The architecture in Fig. 1 gave us the best          N3      18     4      1552       6077     0    83.8   79.4   81.5
+performance. For regularization parameters, we tried several         REM      132   356      533         1    9442   88.4   90.2   89.3
+values for the weight decay parameters ranging from 10−1
+to 10−5 . The value of 10−3 gave us the best performance.                                        TABLE III
+For training parameters, we tried several values of learning         C ONFUSION MATRIX OBTAINED FROM 20- FOLD CROSS - VALIDATION ON
+                                                                              F PZ -C Z CHANNEL FROM THE S LEEP -EDF DATASET
+rates ranging from 10−3 to 10−8 . We also experimented
+with the mini-batch size (from 50 to 200) during the pre-                                  Predicted                  Per-class Metrics
+training, the batch size (from 5 to 40) and sequence length                   W      N1       N2       N3     REM    PR      RE      F1
+(from 5 to 40) during fine-tuning. Other parameters such as           W      6614   745      181        81     306   86.0   83.4   84.7
+beta1, beta2 and the threshold of the gradient clipping were          N1      295   1406     631        30     442   43.5   50.1   46.6
+chosen from the default values reported in the literature. The        N2      391   618     14542      1473   775    90.5   81.7   85.9
+training parameters mentioned in Section IV-D gave us the             N3      29     9       291       5370     4    77.1   94.2   84.8
+best performance. With these settings, the pre-training and          REM      360   457      419         7    6474   80.9   83.9   82.4
+fine-tuning steps started to converge after 100 and 200 epochs
+respectively.
+                                                                    in their papers. We classified the methods into two groups:
+                                                                    non-independent and independent training and test sets. The
+G. Sleep Stage Scoring Performance                                  non-independent ones were the methods that included parts
+   Table II and III show confusion matrices obtained from           of the test subjects’ epochs in the training data, while the
+the 31-fold and the 20-fold cross-validation on the F4-EOG          independent ones were the methods that excluded all epochs
+(Left) and the Fpz-Cz channels from the MASS and Sleep-             of the test subjects from the training data. We believe that
+EDF datasets respectively. We did not include the confusion         the practical evaluation scheme should not include any epochs
+matrix obtained from the Pz-Oz channel from the Sleep-EDF           from the test subjects. Also, it has been shown that the
+dataset as the Fpz-Cz channel gave a better performance. Each       non-independent scheme resulted in an improvement of the
+row and column represent the number of 30-s EEG epochs              performance [7]. Thus we did not compare the performance
+of each sleep stage classified by the sleep expert and our          of our method with the non-independent group. The numbers
+model respectively. The numbers in bold indicate the number         in bold indicate the highest performance metrics of all methods
+of epochs that were correctly classified by our model. The          in each dataset of each group.
+last three columns in each row indicate per-class performance          Among the methods in the independent group, it can be
+metrics computed from the confusion matrix.                         seen that our method achieved a similar performance com-
+   It can be seen that the poorest performance was noted for        pared to the state-of-the-art methods that used the same EEG
+the stage N1, with the F1 less than 60, while the F1 for other      channel and dataset. It should also be emphasized that our
+stages were significantly better, with the range between 81.5       model achieved the similar performance without sacrificing
+and 90.3. Most of the misclassified stages were between N2          the performance on the stage N1, which is the most difficult
+and N3. It can also be seen that the confusion matrix is almost     sleep stage to classify. This indicates that our method was not
+symmetric via the diagonal line (except the pair of N2-N3).         biased by favoring the majority of the sleep stages than the
+This indicates that the misclassifications were less likely to be   minority ones. According to the κ coefficient, it showed that
+due to the imbalance-class problem.                                 the agreement between the sleep experts and our model were
+   Fig. 2 demonstrate examples of hypnograms that were              substantial (between 0.61 and 0.80) [9]. It should also be noted
+manually scored by a sleep expert, and automatically scored         that our model performed better when applied on the Fpz-Cz
+by our DeepSleepNet for Subject-1 from the MASS dataset.            channel compared to the Pz-Oz, which is similar to [7].
+
+H. Comparison with State-of-the-Art Approaches                      I. Sequence Residual Learning
+  Table IV shows a comparison between our method and                   We performed additional experiments to verify the impor-
+other sleep stage scoring methods across ACC, MF1, κ                tant of the sequence residual learning part with the MASS
+and F1. These methods include the ones that utilize hand-           dataset. Table V shows a confusion matrix obtained from
+engineered features [7]–[9], [12], CNNs only [11] or LSTMs          31-fold cross-validation on the F4-EOG (Left) channel using
+only (which is our previous work) [13]. The other methods’          DeepSleepNet without the sequence residual learning part (i.e.,
+metrics were computed using the confusion matrices reported         using the pre model in Algorithm 1). It can be seen that the
+SUPRATAK et al.: DEEPSLEEPNET: A MODEL FOR AUTOMATIC SLEEP STAGE SCORING BASED ON RAW SINGLE-CHANNEL EEG                                                     7
+
+
+
+
+                                                               Hypnogram manually scored by a sleep expert
+              REM
+Sleep stage
+
+               N3
+               N2
+               N1
+                W
+                    0                        200                        400                       600                          800                    1000
+                                                                       30-s Epoch (120 epochs = 1 hour)
+                                                             Hypnogram automatically scored by DeepSleepNet
+              REM
+Sleep stage
+
+
+
+
+               N3
+               N2
+               N1
+                W
+                    0                        200                        400                       600                          800                    1000
+                                                                       30-s Epoch (120 epochs = 1 hour)
+
+Fig. 2. Examples of the hypnogram manually scored by a sleep expert (top) and the hypnogram automatically scored by DeepSleepNet (bottom) for Subject-1
+from the MASS dataset.
+
+                                                                         TABLE IV
+              C OMPARISON BETWEEN D EEP S LEEP N ET AND OTHER SLEEP STAGE SCORING METHODS THAT UTILIZES HAND - ENGINEERING FEATURES ACROSS
+                           OVERALL ACCURACY (ACC), MACRO -F1 SCORE (MF1), C OHEN ’ S K APPA (κ), AND P ER - CLASS F1-S CORE (F1)
+
+
+                                                                                        Overall Metrics               Per-class F1-Score (F1)
+                          Methods         Dataset      EEG Channel      Test Epochs
+                                                                                      ACC    MF1       κ       W       N1       N2     N3     REM
+                        Non-independent Training and Test Sets
+                          Ref. [12]      Sleep-EDF           Fpz-Cz        960         90.3    76.5       -    77.3    46.5   94.9   72.2    91.8
+                          Ref. [8]       Sleep-EDF           Pz-Oz        15136        91.3     77      0.86   97.8    30.4    89    85.5    82.5
+                          Ref. [9]       Sleep-EDF           Pz-Oz         7596        90.8     80      0.85   96.9    49.1    89    84.2    81.2
+                        Independent Training and Test Sets
+                          Ref. [7]       Sleep-EDF           Fpz-Cz       37022        78.9    73.7       -    71.6    47.0   84.6   84.0    81.4
+                          Ref. [11]      Sleep-EDF           Fpz-Cz       37022        74.8    69.8       -    65.4    43.7   80.6   84.9    74.5
+                        DeepSleepNet     Sleep-EDF           Fpz-Cz       41950        82.0    76.9     0.76   84.7    46.6   85.9   84.8    82.4
+                        DeepSleepNet     Sleep-EDF           Pz-Oz        41950        79.8    73.1     0.72   88.1     37    82.7   77.3    80.3
+
+                          Ref. [13]        MASS        F4-EOG (Left)      59066        85.9    80.5       -    84.6    56.3   90.7   84.8    86.1
+                        DeepSleepNet       MASS        F4-EOG (Left)      58600        86.2    81.7     0.80   87.3    59.8   90.3   81.5    89.3
+
+
+
+F1 of all sleep stages, except the stage N3, were lower than                          different sleep stages. Specifically, we determined which filters
+the ones in Table II. This was because of an increase in the                          were mostly active for each sleep stage by computing the
+misclassifications between the pairs of N1-N2, N2-N3 and N1-                          average of the sum of the activations of all filters across
+REM. This may well be due to the effects of oversampling the                          samples of each sleep stage. Formally, suppose there were
+training set to have balanced-class samples. As a consequence                         N 30-s EEG epochs from each validation fold {x1 , ..., xN }.
+the model tended to predict more of stages N1 and N3.                                 We fed these epochs to our model to obtain activations z from
+These results indicated that the process to stack the pre-                            the first convolutional layer of each CNN: {z1 , ..., zN }, where
+trained representation learning part with the sequence residual                       zi ∈ Rp×q , and p and q are the activation output size and the
+learning part, and then fine-tune the both parts with sequential                      number of filters of the first convolutional layer. The average
+training set helped improve the classification performance.                           of the sum of the activations of the filter k for the sleep stage
+                                                                                      c is computed as follows:
+J. Model Analysis                                                                                                     PNypred =c Pq
+                                                                                                                        i=1          j=1 zi,j,k
+   To better understanding how our model classified a sequence                                        uc,k     =                                        (9)
+                                                                                                                              Nypred =c
+of 30-s EEG epochs, we analyzed and compared: 1) the
+learned filters at the first convolutional layers of the two                          where uc,k is the average of the sum of the activation of the
+CNNs in the representation learning part; and 2) the memory                           filter k for sleep stage c, zi,j,k is the j-th index of the activation
+cells inside the bidirectional-LSTMs in the sequence residual                         vector zi of the filter k, and Nypred =c is the number of EEG
+learning part. This analysis was carried out with the MASS                            epochs that our model predicted as stage c. After we computed
+dataset across 31 cross-validation folds.                                             the uc,k of all filters for sleep stage c, we rescaled them into
+   Firstly, we analyzed how our model utilized the learned filter                     a range of 0 and 1. We denote this scaled k-dimension vector
+at the first convolutional layers of the two CNNs to classify                         uc as filter activations for stage c. This process was repeated
+8                                          THIS ARTICLE HAS BEEN PUBLISHED IN IEEE TRANSACTIONS ON NEURAL SYSTEMS AND REHABILITATION ENGINEERING.
+
+
+
+
+          N1                                                      N3                                                               N1                  N3
+
+
+
+
+      W                         N2                                                    REM                       W                         N2                       REM
+                                                                              N3                                      N1                        N3
+                       There was no N1
+
+
+
+
+              W                                  N2                                         REM         W                          N2                        REM
+                  N1                                         N3                                                            N1                           N3
+
+
+
+
+          W                N2                                                          REM              W                                  N2                      REM
+                                                      (a)                                                                        (b)
+Fig. 3. Examples of the filter activations from the first convolutional layers of the two CNNs obtained by feeding our model with data from 3 subjects. The
+filter activations from the small filters are on the left (a), and the larger filters are on the right (b). Each image has 5 rows and 64 columns, corresponding to
+5 sleep stages and 64 filters respectively. Each pixel represents the scaled value of uc,k from (9), where 1 (i.e., active) is white and 0 (i.e., inactive) is black.
+Each row corresponds to the 64-dimension vector (i.e., k is 64) for each sleep stage c. The first row is from stage W and the last row is from stage REM.
+Each image also has labels indicating which filters are mostly active for which sleep stages.
+
+
+
+                                 TABLE V                                                          dataset.
+    C ONFUSION MATRIX OBTAINED FROM 31- FOLD CROSS - VALIDATION ON                                   Secondly, we analyzed how our model utilized the
+       THE F4-EOG (L EFT ) CHANNEL FROM THE MASS DATASET USING
+         D EEP S LEEP N ET WITHOUT S EQUENCE R ESIDUAL L EARNING                                  bidirectional-LSTMs to learn the temporal information from
+                                                                                                  a sequence of EEG epochs. Specifically, we investigated how
+                                     Predicted                          Per-class Metrics         the bidirectional-LSTMs managed their memory cells (i.e., c
+                  W             N1      N2            N3     REM       PR      RE      F1         in (4) and (5)) using the visualization technique from [33]. We
+     W         5215          709           94          19    190       84.5    83.7   84.1        found several memory cells of the forward LSTMs that were
+     N1        468          2582          747          11    916       40.8    54.7   46.8        interpretable. For instance, several cells were keeping track of
+     N2        241          1846         24140        2435   872       93.4    81.7   87.2        the wakefulness or the sleep onset, which reset their values
+     N3         19            3           472         7156    1        74.3    93.5   82.8        to positive numbers (i.e., active) when a subject was in the
+    REM        227          1181          383          5     8668      81.4    82.8   82.1        stage W or N1 respectively. The cell values then decreased to
+                                                                                                  negative values (i.e., becoming inactive) during stages N2, N3
+                                                                                                  and REM (or R in short). Fig. 4 illustrates the changes of this
+                                                                                                  cell value according to a sequence of sleep stages predicted by
+for all sleep stages. Once we got the filter activations from
+                                                                                                  our model. The sleep stages are arranged according through
+all sleep stages, we stacked them together, and rearranged the
+                                                                                                  time from left-to-right, and top-to-bottom. Each sleep stage
+order of the filters such that the filters that were mostly active
+                                                                                                  color corresponds to tanh(c), where +1 (i.e., active) is blue
+for each sleep stage were grouped together. Fig. 3 illustrates
+                                                                                                  and -1 is red (i.e., inactive). There were also other interpretable
+an example of the filter activations from the small (a) and
+                                                                                                  cells such as the ones that started with a high value at the
+large (b) filters obtained by feeding our model with data
+                                                                                                  beginning of each subject data and then slowly decreased with
+from 3 subjects. Each image has 5 rows and 64 columns,
+                                                                                                  each sleep stage until the end of the subject data, or the ones
+corresponding to 5 sleep stages and 64 filters respectively.
+                                                                                                  that turned on when they found a continuous sequence of
+Each pixel represents the value of uc,k from (9) scaled into a
+                                                                                                  stages N3 and REM. The existence of these cells showed that
+range of 0 and 1, where 1 (i.e., active) is white and 0 (i.e.,
+                                                                                                  the LSTMs inside the sequence residual learning part learned
+inactive) is black. Each row corresponds to the 64-dimension
+                                                                                                  to keep track of the current status of each subject, which is
+vector (i.e., k is 64) for each sleep stage c. The first row is
+                                                                                                  important to correctly identify the next sleep stages according
+from stage W and the last row is from stage REM. Each image
+                                                                                                  to the stage transition rules [3].
+also has labels indicating which filters are mostly active for
+which sleep stages. We found that there were two types of
+filters: ones that were mostly active for each sleep stage, and                                                            V. D ISCUSSION
+the other ones that were mostly active for multiple sleep stages.                                    We propose the DeepSleepNet model that utilizes CNNs
+For instance, some of the small and large filters were mostly                                     and bidirectional-LSTMs to automatically learn features for
+active for both stage N2 and N3. After we had analyzed all                                        sleep stage scoring from raw single-channel EEGs without
+of the filter activations from different cross-validation folds,                                  using any hand-engineered features. The results showed that,
+we found that the number of active filters for different sleep                                    without changing the model architecture and the training
+stages varied across subjects, and most of the small filters were                                 algorithm, the model could be applied on different EEG
+mostly active for stage N2 and N3. We also found that, for                                        channels (F4-EOG (Left), Fpz-Cz and Pz-Oz). It achieved
+a few subjects, no small filter was active for stage N1. This                                     similar overall accuracy and macro F1-score compared to the
+might well be because there were only a few stage N1 in the                                       state-of-the-art hand-engineering methods on both the MASS
+SUPRATAK et al.: DEEPSLEEPNET: A MODEL FOR AUTOMATIC SLEEP STAGE SCORING BASED ON RAW SINGLE-CHANNEL EEG                                         9
+
+
+
+                                                                                 such as the cells that were keeping track of the wakefulness
+                                                                                 or the sleep onset, the cells that increased or decreased its
+                                                                                 value over time, and the cells that detected a train of stage
+                                                                                 N3 and REM. Our model utilized a combination of these
+                                                                                 cells to understand the current status of each subject, and
+                                                                                 to formulate transition rules. For instance, our model might
+                                                                                 remember that the subject was now awake or in the stage
+                                                                                 W. The next possible stage was very likely to be either stage
+                                                                                 W or N1. It should be emphasized that our model can learn
+                                                                                 these features from raw single-channel EEG without utilizing
+                                                                                 any hand-engineered features. Moreover, we observed that
+                                                                                 the features that our model learned were consistent across
+                                                                                 different folds. Therefore, we believe that DeepSleepNet is
+                                                                                 a better approach to implement automatic sleep stage scoring
+                                                                                 system compared to the hand-engineering ones that require
+                                                                                 prior knowledge to design feature extraction algorithms.
+Fig. 4. An example of the LSTM cell that is active at the beginning of              Even though our results are encouraging, our model is still
+wakefulness (i.e., stage W) or the sleep onset (i.e., stage N1). The sequences
+of sleep stages are the predictions from DeepSleepNet on one subject data,       subject to several limitations. Firstly, our model requires being
+arranged through time from left-to-right and top-to-bottom. The background       trained with a sufficient amount of sleep dataset. This is due
+color of each stage corresponds to tanh(c), where +1 is blue and -1 is red.      to the nature of the deep learning techniques that require a
+                                                                                 significant amount of training data to learn useful represen-
+                                                                                 tations from the data. We performed additional experiments
+and Sleep-EDF datasets, which have different properties such                     with the MASS dataset to estimate the number of epochs
+as sampling rate and scoring standards (AASM and R&K).                           required to train our DeepSleepNet. We tried different numbers
+The results also showed that the temporal information learned                    of folds (i.e., k) for the k-fold cross-validation from 2 to 31.
+from the sequence residual learning part helped improve the                      We found that the scoring performance started to drop when
+classification performance. These demonstrated that our model                    k was less than 12, or when the number of training epochs
+could automatically learn features for sleep stage scoring from                  was approximately less than 54000. Secondly, as our model
+different raw single-channel EEGs.                                               learns features from the training data, it might not perform
+   There are two main reasons that we evaluated our model                        well when the trained model is applied to the data that have
+with the F4-EOG (Left) channel from the MASS dataset,                            properties different from the training data such as data from
+which is different from most of the existing methods reported                    different EEG channels. The model might have to be re-trained
+in the literature that rely on the electrodes at the central                     or fine-tuned before it can be applied to the data with different
+lobe such as Cz, C4 and C3. The first reason is to compare                       properties. Lastly, as our model utilizes bidirectional-LSTMs,
+the scoring performance with our previous hand-engineering                       the model has to wait until it has collected enough 30-s EEG
+approach. The second reason is that it is much easier and more                   epochs (depending on the sequence length of the EEG epochs
+comfortable to collect data either at sleep clinics or from home                 used during the training process) before it can score these
+environment compared to the existing methods. This is because                    epochs. For instance, when the sequence length is set to 25,
+both of the electrodes do not have problems of reading the                       the model has to wait for 30×25 seconds (or 12.5 minutes)
+electrical activity from the hairy scalp. Even though the F4-                    before it can identify sleep stages for these 25 EEG epochs.
+EOG (Left) channel does not have information from the central
+and occipital lobes as recommended in the AASM manual [3],
+our results showed that our model was still able to achieve a                               VI. C ONCLUSION AND F UTURE W ORK
+similar performance compared to the state-of-the-art methods.                       We propose a deep learning model, named DeepSleepNet,
+   Based on the results of our simple model analysis, we                         for automatic sleep stage scoring based on raw single-channel
+found that our model learned several interesting features that                   EEG without utilizing any hand-engineered features. Our
+were consistent with the AASM manual (which is the same                          model utilizes CNNs to extract time-invariant features, and
+manual the experts followed to score the MASS dataset). In the                   bidirectional-LSTMs to learn stage transition rules among
+representation learning part, some of the learned filters at the                 sleep stages from EEG epochs. We also implement the two-
+first convolutional layers of the two CNNs were mostly active                    step training algorithm that pre-trains our model with the
+for stage N2-N3 and W-N1-REM (see Fig 3). This implies that                      oversampled dataset to alleviate class-imbalance problems, and
+our model recognized some patterns that are similar among                        fine-tunes the model with the sequences of EEG epochs to
+such stages. Our model might learn the filters to detect sleep                   encode the temporal information into the model. Our results
+spindles that can appear in both N2 and N3 stages, and to                        showed that, without changing the model architecture and
+detect different features of the eye movements from the EOG                      the training algorithm, our model was able to automatically
+(Left) that can be used to distinguish among W, N1 and REM                       learn features for sleep stage scoring from different raw
+stages. Also, in the sequence residual learning part, we found                   single-channel EEGs from two datasets that have different
+some interpretable memory cells in the bidirectional-LSTMs                       properties and scoring standards. Our model analysis results
+10                             THIS ARTICLE HAS BEEN PUBLISHED IN IEEE TRANSACTIONS ON NEURAL SYSTEMS AND REHABILITATION ENGINEERING.
+
+
+
+also demonstrated that our model learned several features                         [21] C. Szegedy et al., “Rethinking the Inception Architecture for Computer
+that are consistent with the AASM manual. As our model                                 Vision,” arXiv preprint arXiv:1512.00567, 2015.
+                                                                                  [22] D. Kingma and J. Ba, “Adam: A method for stochastic optimization,”
+automatically learn features from raw EEG, we believe that                             arXiv preprint arXiv:1412.6980, 2014.
+DeepSleepNet is a better approach to realize a remote sleep                       [23] R. Pascanu, T. Mikolov, and Y. Bengio, “On the difficulty of training
+monitoring compared to the hand-engineering ones.                                      Recurrent Neural Networks,” arXiv preprint arXiv:1211.5063, 2012.
+                                                                                  [24] N. Srivastava et al., “Dropout : A Simple Way to Prevent Neural
+   In the future, we plan to improve our DeepSleepNet to be                            Networks from Overfitting,” J. of Machine Learning Research, vol. 15,
+able to apply on the single-channel EEG such as the F4-EOG                             pp. 1929–1958, 2014.
+(Left) and Fp2-EOG (Left) collected from wearable devices.                        [25] W. Zaremba, I. Sutskever, and O. Vinyals, “Recurrent Neural Network
+                                                                                       Regularization,” arXiv preprint arXiv:1409.2329, 2014.
+                                                                                  [26] C. O’Reilly et al., “Montreal Archive of Sleep Studies: an open-access
+                         ACKNOWLEDGMENT                                                resource for instrument benchmarking and exploratory research,” J. of
+                                                                                       Sleep Research, vol. 23, no. 6, pp. 628–635, 2014.
+   The authors would like to thank Douglas McIlwraith and                         [27] A. L. Goldberger et al., “PhysioBank, PhysioToolkit, and PhysioNet:
+Axel Oehmichen from Imperial College London who reviewed                               Components of a New Research Resource for Complex Physiologic
+the contents of the paper, and provided support for running the                        Signals,” Circulation, pp. 591–596, 2000.
+                                                                                  [28] B. Kemp et al., “Analysis of a sleep-dependent neuronal feedback loop:
+k-fold cross-validation.                                                               The slow-wave microcontinuity of the EEG,” IEEE Trans. Biomed. Eng.,
+                                                                                       vol. 47, no. 9, pp. 1185–1194, 2000.
+                              R EFERENCES                                         [29] T. D. Lagerlund, “Manipulating the magic of digital EEG: Montage
+                                                                                       reformatting and filtering,” Amer. J. of Electroneurodiagnostic Tech.,
+ [1] K. Wulff et al., “Sleep and circadian rhythm disruption in psychiatric            vol. 40, no. 2, pp. 121–136, 2000.
+     and neurodegenerative disease,” Nature Reviews Neuroscience, vol. 11,        [30] J. Cohen, “A Coefficient of Agreement for Nominal Scales,” Educational
+     no. 8, pp. 589–599, 2010.                                                         and Psychological Measurement, vol. 20, no. 1, pp. 37–46, 1960.
+ [2] J. Allan Hobson, “A manual of standardized terminology, techniques and       [31] M. Sokolova and G. Lapalme, “A systematic analysis of performance
+     scoring system for sleep stages of human subjects,” Electroencephalog-            measures for classification tasks,” Inform Process. and Manage., vol. 45,
+     raphy and Clinical Neurophysiology, vol. 26, no. 6, p. 644, 1969.                 no. 4, pp. 427–437, jul 2009.
+ [3] C. Iber et al., The AASM manual for the scoring of sleep and associated      [32] M. Abadi et al., “TensorFlow: Large-Scale Machine Learning on Hetero-
+     events, 2007.                                                                     geneous Distributed Systems,” arXiv preprint arXiv:1603.04467, 2015.
+ [4] T. Lajnef et al., “Learning machines and sleeping brains: Automatic          [33] A. Karpathy, J. Johnson, and L. Fei-Fei, “Visualizing and Understanding
+     sleep stage classification using decision-tree multi-class support vector         Recurrent Networks,” arXiv preprint arXiv:1506.02078, 2015.
+     machines,” J. of Neuroscience Methods, vol. 250, pp. 94–105, 2015.
+ [5] C. S. Huang et al., “Knowledge-based identification of sleep stages
+     based on two forehead electroencephalogram channels,” Frontiers in
+     Neuroscience, vol. 8, p. 263, 2014.
+ [6] S. Güne, K. Polat, and e. Yosunkaya, “Efficient sleep stage recognition
+     system based on EEG signal using k-means clustering based feature
+     weighting,” Expert Syst. with Applicat., vol. 37, no. 12, pp. 7922–7928,
+     2010.
+ [7] O. Tsinalis, P. M. Matthews, and Y. Guo, “Automatic Sleep Stage Scor-
+     ing Using Time-Frequency Analysis and Stacked Sparse Autoencoders,”
+     Ann. of Biomedical Eng., vol. 44, no. 5, pp. 1587–1597, 2016.
+ [8] R. Sharma, R. B. Pachori, and A. Upadhyay, “Automatic sleep stages
+     classification based on iterative filtering of electroencephalogram sig-
+     nals,” Neural Computing and Applicat., pp. 1–20, 2017.
+ [9] A. R. Hassan and A. Subasi, “A decision support system for auto-
+     mated identification of sleep stages from single-channel EEG signals,”
+     Knowledge-Based Syst., vol. 0, pp. 1–10, 2017.
+[10] M. Längkvist, L. Karlsson, and A. Loutfi, “Sleep Stage Classification
+     Using Unsupervised Feature Learning,” Advances in Artificial Neural
+     Syst., vol. 2012, pp. 1–9, 2012.
+[11] O. Tsinalis et al., “Automatic Sleep Stage Scoring with Single-
+     Channel EEG Using Convolutional Neural Networks,” arXiv preprint
+     arXiv:1610.01683, 2016.
+[12] Y.-L. Hsu et al., “Automatic sleep stage recurrent neural classifier using
+     energy features of EEG signals,” Neurocomputing, vol. 104, pp. 105–
+     114, 2013.
+[13] H. Dong et al., “Mixed Neural Network Approach for Temporal Sleep
+     Stage Classification,” arXiv preprint arXiv:1610.06421, 2016.
+[14] M. X. Cohen, Analyzing Neural Time Series Data: Theory and Practice.
+     MIT Press, 2014.
+[15] S. Ioffe and C. Szegedy, “Batch Normalization: Accelerating Deep
+     Network Training by Reducing Internal Covariate Shift,” arXiv preprint
+     arXiv:1502.03167, 2015.
+[16] K. He et al., “Deep Residual Learning for Image Recognition,” in Cvpr,
+     2016, pp. 770–778.
+[17] M. Schuster and K. Paliwal, “Bidirectional recurrent neural networks,”
+     IEEE Trans. Signal Process., vol. 45, no. 11, pp. 2673–2681, 1997.
+[18] S. Hochreiter and J. Schmidhuber, “Long Short-Term Memory,” Neural
+     Computation, vol. 9, no. 8, pp. 1735–1780, 1997.
+[19] F. Gers and J. Schmidhuber, “Recurrent nets that time and count,” in
+     Proc. IJCNN’2000, Int. Joint Conf. on Neural Networks, vol. 3, 2000,
+     pp. 189–194 vol.3.
+[20] H. Sak, A. Senior, and F. Beaufays, “Long Short-Term Memory Based
+     Recurrent Neural Network Architectures for Large Vocabulary Speech
+     Recognition,” arXiv preprint arXiv:1402.1128, 2014.
+SUPRATAK et al.: DEEPSLEEPNET: A MODEL FOR AUTOMATIC SLEEP STAGE SCORING BASED ON RAW SINGLE-CHANNEL EEG   11
+
+
+
+                    Akara Supratak is currently a Ph.D. candidate at
+                    Data Science Institute, Department of Computing,
+                    Imperial College London. His research is in the area
+                    of bio-medical engineering, software engineering
+                    and deep learning.
+
+
+
+
+                    Hao Dong is currently a Ph.D. candidate at Data
+                    Science Institute, Department of Computing, Impe-
+                    rial College London. His research is in the areas of
+                    deep learning and biomedical engineering, especially
+                    with EEG data.
+
+
+
+
+                    Chao Wu is currently a Research Associate in
+                    Data Science Institute, Department of Computing,
+                    Imperial College London. His research is in the area
+                    of big data analysis, modelling and applications.
+
+
+
+
+                    Yike Guo is currently a Professor of Computing
+                    Science and a Director of Data Science Institute in
+                    the Department of Computing at Imperial College
+                    London. His research is in the areas of large scale
+                    scientific data analysis, data mining algorithms and
+                    applications, parallel algorithms and cloud comput-
+                    ing.
+
