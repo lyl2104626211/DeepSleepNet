@@ -17,6 +17,8 @@ class ModelSummary:
 
 
 def _compute_same_padding(length: int, kernel_size: int, stride: int, dilation: int = 1) -> tuple[int, int]:
+    """按 TensorFlow SAME padding 的规则计算左右补零。"""
+
     output_length = math.ceil(length / stride)
     effective_kernel = (kernel_size - 1) * dilation + 1
     total_padding = max((output_length - 1) * stride + effective_kernel - length, 0)
@@ -26,7 +28,7 @@ def _compute_same_padding(length: int, kernel_size: int, stride: int, dilation: 
 
 
 class SamePadConv1d(nn.Module):
-    """与原始 TensorFlow 实现一致的 SAME padding 1D 卷积。"""
+    """保持和原始 TensorFlow 实现一致的 SAME padding 卷积。"""
 
     def __init__(
         self,
@@ -54,12 +56,11 @@ class SamePadConv1d(nn.Module):
             kernel_size=self.kernel_size,
             stride=self.stride,
         )
-        padded_inputs = F.pad(inputs, (left_padding, right_padding))
-        return self.conv(padded_inputs)
+        return self.conv(F.pad(inputs, (left_padding, right_padding)))
 
 
 class SamePadMaxPool1d(nn.Module):
-    """与原始 TensorFlow 实现一致的 SAME padding 1D 最大池化。"""
+    """保持和原始 TensorFlow 实现一致的 SAME padding 池化。"""
 
     def __init__(self, kernel_size: int, stride: int) -> None:
         super().__init__()
@@ -78,7 +79,7 @@ class SamePadMaxPool1d(nn.Module):
 
 
 class ConvBnReluBlock(nn.Module):
-    """卷积 -> BN -> ReLU，与论文和官方实现顺序一致。"""
+    """卷积主干最基础的一个块。"""
 
     def __init__(
         self,
@@ -105,7 +106,7 @@ class ConvBnReluBlock(nn.Module):
 
 
 class CNNBranch(nn.Module):
-    """DeepSleepNet 的单个 CNN 分支。"""
+    """DeepSleepNet 的一个 CNN 分支。"""
 
     def __init__(
         self,
@@ -134,7 +135,7 @@ class CNNBranch(nn.Module):
 
 
 class PeepholeLSTMCell(nn.Module):
-    """带 peephole 的 LSTMCell。"""
+    """最小实现版 peephole LSTMCell。"""
 
     def __init__(
         self,
@@ -144,8 +145,6 @@ class PeepholeLSTMCell(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        # TensorFlow 原版 LSTMCell 默认会给 forget gate 额外加 1.0，
-        # 这样训练初期更倾向于“先记住已有状态”，更接近官方实现。
         self.forget_bias = forget_bias
         self.input_linear = nn.Linear(input_size, hidden_size * 4)
         self.hidden_linear = nn.Linear(hidden_size, hidden_size * 4, bias=False)
@@ -160,15 +159,13 @@ class PeepholeLSTMCell(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_state, cell_state = state
         gates = self.input_linear(inputs) + self.hidden_linear(hidden_state)
-        # 这里按 TensorFlow v1 LSTMCell 的顺序拆门：i, j, f, o
-        # 其中 j 对应候选记忆，不是 forget gate。
+
+        # 顺序保持和 TensorFlow v1 LSTMCell 一致：i, j, f, o。
         input_gate, candidate_gate, forget_gate, output_gate = gates.chunk(4, dim=-1)
 
         input_gate = torch.sigmoid(input_gate + self.peephole_i * cell_state)
         candidate_gate = torch.tanh(candidate_gate)
-        forget_gate = torch.sigmoid(
-            forget_gate + self.forget_bias + self.peephole_f * cell_state
-        )
+        forget_gate = torch.sigmoid(forget_gate + self.forget_bias + self.peephole_f * cell_state)
 
         next_cell_state = forget_gate * cell_state + input_gate * candidate_gate
         output_gate = torch.sigmoid(output_gate + self.peephole_o * next_cell_state)
@@ -188,9 +185,7 @@ class StackedBidirectionalPeepholeLSTM(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        self.num_layers = num_layers
         self.output_dropout = output_dropout
-
         self.forward_layers = nn.ModuleList()
         self.backward_layers = nn.ModuleList()
 
@@ -206,54 +201,57 @@ class StackedBidirectionalPeepholeLSTM(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return (
-            torch.zeros(batch_size, self.hidden_size, device=device, dtype=dtype),
-            torch.zeros(batch_size, self.hidden_size, device=device, dtype=dtype),
-        )
+        zeros = torch.zeros(batch_size, self.hidden_size, device=device, dtype=dtype)
+        return zeros, zeros.clone()
 
-    def forward(self, inputs: torch.Tensor) -> tuple[torch.Tensor, list[dict[str, tuple[torch.Tensor, torch.Tensor]]]]:
-        batch_size, sequence_length, _ = inputs.shape
+    def _run_direction(
+        self,
+        cell: PeepholeLSTMCell,
+        inputs: torch.Tensor,
+        time_indices: range,
+    ) -> tuple[list[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+        state = self._init_state(inputs.shape[0], inputs.device, inputs.dtype)
+        outputs: list[torch.Tensor] = []
+
+        for time_idx in time_indices:
+            hidden_state, cell_state = cell(inputs[:, time_idx, :], state)
+            state = (hidden_state, cell_state)
+            outputs.append(F.dropout(hidden_state, p=self.output_dropout, training=self.training))
+
+        return outputs, state
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[dict[str, tuple[torch.Tensor, torch.Tensor]]]]:
+        _, sequence_length, _ = inputs.shape
         layer_input = inputs
         final_states: list[dict[str, tuple[torch.Tensor, torch.Tensor]]] = []
 
         for forward_cell, backward_cell in zip(self.forward_layers, self.backward_layers):
-            forward_state = self._init_state(batch_size, layer_input.device, layer_input.dtype)
-            backward_state = self._init_state(batch_size, layer_input.device, layer_input.dtype)
-
-            forward_outputs: list[torch.Tensor] = []
-            backward_outputs: list[torch.Tensor | None] = [None] * sequence_length
-
-            for time_idx in range(sequence_length):
-                hidden_state, cell_state = forward_cell(layer_input[:, time_idx, :], forward_state)
-                forward_state = (hidden_state, cell_state)
-                forward_outputs.append(
-                    F.dropout(hidden_state, p=self.output_dropout, training=self.training)
-                )
-
-            for time_idx in range(sequence_length - 1, -1, -1):
-                hidden_state, cell_state = backward_cell(layer_input[:, time_idx, :], backward_state)
-                backward_state = (hidden_state, cell_state)
-                backward_outputs[time_idx] = F.dropout(
-                    hidden_state,
-                    p=self.output_dropout,
-                    training=self.training,
-                )
+            forward_outputs, forward_state = self._run_direction(
+                forward_cell,
+                layer_input,
+                range(sequence_length),
+            )
+            backward_outputs, backward_state = self._run_direction(
+                backward_cell,
+                layer_input,
+                range(sequence_length - 1, -1, -1),
+            )
 
             forward_stack = torch.stack(forward_outputs, dim=1)
-            backward_stack = torch.stack([output for output in backward_outputs if output is not None], dim=1)
+            backward_stack = torch.stack(list(reversed(backward_outputs)), dim=1)
             layer_input = torch.cat([forward_stack, backward_stack], dim=-1)
-            final_states.append(
-                {
-                    "forward": forward_state,
-                    "backward": backward_state,
-                }
-            )
+            final_states.append({"forward": forward_state, "backward": backward_state})
 
         return layer_input, final_states
 
 
 class DeepFeatureNet(nn.Module):
-    """DeepSleepNet 第一阶段使用的特征提取模型。"""
+    """第一阶段模型，只做单个 epoch 的特征提取和分类。
+    输入张量形状(B*Sequence,dim)
+    """
 
     def __init__(
         self,
@@ -266,6 +264,7 @@ class DeepFeatureNet(nn.Module):
         self.n_classes = n_classes
         self.dropout = nn.Dropout(p=dropout)
 
+        # 一个分支偏向短时间尺度，一个分支偏向长时间尺度。
         self.small_cnn = CNNBranch(
             first_kernel_size=50,
             first_stride=6,
@@ -300,22 +299,23 @@ class DeepFeatureNet(nn.Module):
             return inputs.unsqueeze(1)
         if inputs.ndim == 3 and inputs.shape[1] == 1:
             return inputs
-        raise ValueError(f"DeepFeatureNet 期望输入形状为 [B, L] 或 [B, 1, L]，实际收到 {tuple(inputs.shape)}")
+        raise ValueError(
+            f"DeepFeatureNet 期望输入形状是 [B, L] 或 [B, 1, L]，实际收到 {tuple(inputs.shape)}"
+        )
 
     def extract_features(self, inputs: torch.Tensor) -> torch.Tensor:
         prepared_inputs = self._prepare_inputs(inputs)
         small_features = self.small_cnn(prepared_inputs).flatten(start_dim=1)
         large_features = self.large_cnn(prepared_inputs).flatten(start_dim=1)
-        concatenated_features = torch.cat([small_features, large_features], dim=1)
-        return self.dropout(concatenated_features)
+        features = torch.cat([small_features, large_features], dim=1)
+        return self.dropout(features)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        features = self.extract_features(inputs)
-        return self.classifier(features)
+        return self.classifier(self.extract_features(inputs))
 
 
 class DeepSleepNet(nn.Module):
-    """DeepSleepNet 完整模型。"""
+    """完整的 DeepSleepNet，两阶段中的第二阶段模型。"""
 
     def __init__(
         self,
@@ -331,19 +331,16 @@ class DeepSleepNet(nn.Module):
         self.seq_length = seq_length
         self.return_last = return_last
 
-        # 第一部分：对单个 30 秒 epoch 做双分支 CNN 特征提取。
         self.feature_extractor = DeepFeatureNet(
             input_size=input_size,
             n_classes=n_classes,
             dropout=feature_dropout,
         )
-        # shortcut 分支把 CNN 特征投影到 1024 维，后面和双向 LSTM 输出相加。
         self.shortcut_projection = nn.Sequential(
             nn.Linear(self.feature_extractor.representation_dim, 1024, bias=False),
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
         )
-        # 第二部分：对连续 epoch 序列建模上下文。
         self.sequence_model = StackedBidirectionalPeepholeLSTM(
             input_size=self.feature_extractor.representation_dim,
             hidden_size=512,
@@ -355,27 +352,26 @@ class DeepSleepNet(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         if inputs.ndim != 3:
-            raise ValueError(f"DeepSleepNet 期望输入形状为 [B, S, L]，实际收到 {tuple(inputs.shape)}")
+            raise ValueError(
+                f"DeepSleepNet 期望输入形状是 [B, S, L]，实际收到 {tuple(inputs.shape)}"
+            )
 
         batch_size, sequence_length, signal_length = inputs.shape
-        # 先把序列拆平，让每个 epoch 共用同一个 CNN 特征提取器。
-        flattened_inputs = inputs.reshape(batch_size * sequence_length, signal_length)
 
+        # 先对每个 epoch 共享同一个 CNN 特征提取器。
+        flattened_inputs = inputs.reshape(batch_size * sequence_length, signal_length)
         epoch_features = self.feature_extractor.extract_features(flattened_inputs)
         shortcut_features = self.shortcut_projection(epoch_features)
 
-        # 再恢复成 [B, S, F]，交给双向 LSTM 建模时间上下文。
+        # 再把特征还原成序列，交给双向 LSTM 建模上下文。
         sequence_inputs = epoch_features.reshape(batch_size, sequence_length, -1)
         sequence_outputs, _ = self.sequence_model(sequence_inputs)
 
         shortcut_sequence = shortcut_features.reshape(batch_size, sequence_length, -1)
-        # 论文里的 residual/shortcut 思路：时序输出 + 直接投影特征。
-        combined_outputs = sequence_outputs + shortcut_sequence
-        combined_outputs = self.output_dropout(combined_outputs)
+        combined_outputs = self.output_dropout(sequence_outputs + shortcut_sequence)
 
         if self.return_last:
-            last_logits = self.classifier(combined_outputs[:, -1, :])
-            return last_logits
+            return self.classifier(combined_outputs[:, -1, :])
 
         logits = self.classifier(combined_outputs.reshape(batch_size * sequence_length, -1))
         return logits.reshape(batch_size, sequence_length, -1)
@@ -388,10 +384,10 @@ def build_model_summary(config: ModelConfig) -> ModelSummary:
     return ModelSummary(
         name=config.name,
         description=(
-            "DeepSleepNet baseline：输入为 30 秒、100 Hz 的单通道 EEG（3000 点）；"
-            "前端使用双分支 CNN，分别采用 conv50/stride6 和 conv400/stride50 的首层设置；"
-            "后端为 2 层双向 peephole LSTM（每个方向 512 维），"
-            "并带有 1024 维 shortcut 投影与残差相加，最后输出 5 类 softmax。"
+            "DeepSleepNet baseline：输入是 30 秒、100 Hz 的单通道 EEG（3000 点）；"
+            "前端用双分支 CNN 提取短时和长时特征；"
+            "后端用 2 层双向 peephole LSTM 建模时序上下文；"
+            "最后把 shortcut 分支和时序输出相加，再做 5 分类。"
         ),
     )
 

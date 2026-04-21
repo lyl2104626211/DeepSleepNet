@@ -4,13 +4,11 @@ import argparse
 import json
 import re
 from collections import Counter
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
-# Sleep-EDF 常见的睡眠标签描述。
-# 这里把原始标注统一映射到 5 分类任务：
-# W / N1 / N2 / N3 / REM
+# Sleep-EDF 常见 5 分类映射。
 STAGE_LABEL_MAP = {
     "Sleep stage W": "W",
     "Sleep stage 1": "N1",
@@ -20,13 +18,11 @@ STAGE_LABEL_MAP = {
     "Sleep stage R": "REM",
 }
 
-# 这些标注通常不参与 5 分类训练。
 IGNORED_LABELS = {
     "Sleep stage ?",
     "Movement time",
 }
 
-# DeepSleepNet 常见设置是固定 30 秒一个 epoch。
 DEFAULT_EPOCH_SECONDS = 30
 
 
@@ -41,7 +37,7 @@ class RecordPair:
 
 @dataclass
 class EpochSample:
-    """单个 epoch 的元信息。"""
+    """一个 epoch 的元信息。"""
 
     subject_id: str
     epoch_index: int
@@ -50,49 +46,24 @@ class EpochSample:
     n_samples: int
     channel_name: str
     relative_data_path: str
+    participant_id: str | None = None
 
 
 def _lazy_import_dependencies():
-    """延迟导入重依赖。
-
-    这样做的好处是：
-    1. 没装依赖时，用户仍然能读代码和查看帮助信息；
-    2. 报错点会更明确，而不是一导入模块就直接失败。
-    """
-
     try:
         import mne
         import numpy as np
     except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "运行预处理前请先安装依赖：uv sync"
-        ) from exc
+        raise RuntimeError("运行预处理前请先安装依赖：uv sync") from exc
 
     return mne, np
 
 
 def find_sleep_edf_pairs(input_dir: Path) -> list[RecordPair]:
-    """在目录中自动查找 PSG / Hypnogram 配对文件。
+    """自动匹配同一条记录下的 PSG 和 Hypnogram。"""
 
-    兼容两类常见命名：
-    - 子集调试时的文件：
-      - SC4201E0-PSG.edf
-      - SC4201EC-Hypnogram.edf
-    - 完整 sleep-cassette 中的文件：
-      - SC4001E0-PSG.edf
-      - SC4001EC-Hypnogram.edf
-      - SC4501E0-PSG.edf
-      - SC4501EW-Hypnogram.edf
-
-    关键点是：
-    - PSG 和 Hypnogram 并不是简单固定成 E0 / EC、F0 / FC
-    - 但一组记录通常共享前 6 个字符，例如 `SC4201`
-    """
-
-    psg_files = sorted(input_dir.glob("*-PSG.edf"))
     pairs: list[RecordPair] = []
-
-    for psg_path in psg_files:
+    for psg_path in sorted(input_dir.glob("*-PSG.edf")):
         match = re.match(r"(?P<record_id>[A-Z]{2}\d{4})[A-Z0-9]{2}-PSG\.edf", psg_path.name)
         if match is None:
             continue
@@ -102,40 +73,43 @@ def find_sleep_edf_pairs(input_dir: Path) -> list[RecordPair]:
         if not hypnogram_candidates:
             continue
 
-        # sleep-cassette 中同一组记录通常只对应 1 个 hypnogram 文件。
-        # 若后续遇到多个候选，这里优先取排序后的第一个，至少不会直接中断。
-        hypnogram_path = hypnogram_candidates[0]
         pairs.append(
             RecordPair(
                 subject_id=subject_id,
                 psg_path=psg_path,
-                hypnogram_path=hypnogram_path,
+                hypnogram_path=hypnogram_candidates[0],
             )
         )
 
     return pairs
 
 
-def choose_eeg_channel(channel_names: list[str]) -> str:
-    """优先选择 Sleep-EDF 中最常见的单通道 EEG。
+def infer_participant_id(subject_id: str) -> str:
+    """Sleep-EDF 里同一受试者的两晚记录通常只在最后一位不同。"""
 
-    常见候选：
-    - EEG Fpz-Cz
-    - EEG Pz-Oz
-    """
+    if len(subject_id) >= 2 and subject_id[:2] in {"SC", "ST"} and subject_id[-1].isdigit():
+        return subject_id[:-1]
+    return subject_id
 
-    preferred_channels = [
-        "EEG Fpz-Cz",
-        "EEG Pz-Oz",
-    ]
-    for channel in preferred_channels:
-        if channel in channel_names:
-            return channel
 
-    raise ValueError(
-        "未找到常见的单通道 EEG 通道。当前通道列表为："
-        + ", ".join(channel_names)
-    )
+def _normalize_channel_name(channel_name: str) -> str:
+    return channel_name if channel_name.startswith("EEG ") else f"EEG {channel_name}"
+
+
+def choose_eeg_channel(channel_names: list[str], preferred_channel: str | None = None) -> str:
+    """优先选择论文和官方数据里最常见的两个 EEG 通道。"""
+
+    if preferred_channel is not None:
+        normalized_channel = _normalize_channel_name(preferred_channel)
+        if normalized_channel not in channel_names:
+            raise ValueError("未找到指定 EEG 通道：" + normalized_channel)
+        return normalized_channel
+
+    for channel_name in ["EEG Fpz-Cz", "EEG Pz-Oz"]:
+        if channel_name in channel_names:
+            return channel_name
+
+    raise ValueError("未找到常见单通道 EEG。当前通道列表：" + ", ".join(channel_names))
 
 
 def build_epoch_labels(
@@ -143,19 +117,7 @@ def build_epoch_labels(
     epoch_seconds: int,
     max_second: float | None = None,
 ) -> list[tuple[float, str]]:
-    """把原始区间标注展开成 epoch 级标签。
-
-    返回值中的每一项为：
-    - epoch 起始秒数
-    - 对应的 5 分类标签
-
-    这里的思路很重要：
-    原始 Hypnogram 标注通常是一段时间对应一个睡眠阶段，
-    而模型训练需要的是固定长度 epoch 的标签，所以需要把区间展开。
-
-    max_second 用来限制 epoch 不能超过 PSG 的真实结束时间。
-    这样可以避免标注文件末尾略长于信号时，crop 直接报错。
-    """
+    """把区间标注展开成固定长度 epoch 标注。"""
 
     epoch_labels: list[tuple[float, str]] = []
 
@@ -164,72 +126,77 @@ def build_epoch_labels(
         annotations.duration,
         annotations.description,
     ):
-        if description in IGNORED_LABELS:
+        if description in IGNORED_LABELS or description not in STAGE_LABEL_MAP:
             continue
 
-        if description not in STAGE_LABEL_MAP:
-            continue
-
-        mapped_label = STAGE_LABEL_MAP[description]
+        label = STAGE_LABEL_MAP[description]
         epoch_count = int(duration // epoch_seconds)
-
         for offset_idx in range(epoch_count):
             epoch_start = float(onset + offset_idx * epoch_seconds)
             epoch_end = epoch_start + epoch_seconds
             if max_second is not None and epoch_end > max_second:
-                # 末尾越界的 epoch 直接丢弃，避免超过真实信号范围。
                 continue
-            epoch_labels.append((epoch_start, mapped_label))
+            epoch_labels.append((epoch_start, label))
 
     return epoch_labels
 
 
+def trim_edge_wake_epochs(epoch_labels: list[tuple[float, str]], wake_minutes: int) -> list[tuple[float, str]]:
+    """只保留睡眠段前后指定分钟数的清醒 W，内部的 W 不受影响。"""
+
+    if wake_minutes <= 0 or not epoch_labels:
+        return epoch_labels
+
+    first_sleep_index = next((index for index, (_, label) in enumerate(epoch_labels) if label != "W"), None)
+    if first_sleep_index is None:
+        return epoch_labels
+
+    last_sleep_index = max(index for index, (_, label) in enumerate(epoch_labels) if label != "W")
+    wake_epochs = max(0, wake_minutes * 60 // DEFAULT_EPOCH_SECONDS)
+    start_index = max(0, first_sleep_index - wake_epochs)
+    end_index = min(len(epoch_labels), last_sleep_index + wake_epochs + 1)
+    return epoch_labels[start_index:end_index]
+
+
 def extract_epoch_array(raw, channel_name: str, start_second: float, epoch_seconds: int):
-    """从指定时间范围裁剪出一个 epoch 的单通道 EEG 数组。"""
+    """从原始 PSG 中裁出单个 epoch 的单通道 EEG。"""
 
     segment = raw.copy().pick([channel_name]).crop(
         tmin=start_second,
         tmax=start_second + epoch_seconds - 1.0 / raw.info["sfreq"],
     )
-    data = segment.get_data()[0]
-    return data
+    return segment.get_data()[0]
 
 
 def process_record_pair(
     pair: RecordPair,
     output_dir: Path,
     epoch_seconds: int,
+    preferred_channel: str | None = None,
+    trim_wake_minutes: int = 0,
 ) -> tuple[list[EpochSample], Counter]:
-    """处理单组 PSG/Hypnogram，输出 epoch 数据和元信息。"""
+    """处理一组 PSG/Hypnogram，保存 epoch 并返回索引信息。"""
 
     mne, np = _lazy_import_dependencies()
 
     raw = mne.io.read_raw_edf(pair.psg_path, preload=False, verbose="ERROR")
     annotations = mne.read_annotations(pair.hypnogram_path)
-    channel_name = choose_eeg_channel(raw.ch_names)
+    channel_name = choose_eeg_channel(raw.ch_names, preferred_channel=preferred_channel)
     max_second = float(raw.times[-1] + 1.0 / raw.info["sfreq"])
+    participant_id = infer_participant_id(pair.subject_id)
 
     subject_output_dir = output_dir / pair.subject_id
     subject_output_dir.mkdir(parents=True, exist_ok=True)
 
-    epoch_labels = build_epoch_labels(
-        annotations=annotations,
-        epoch_seconds=epoch_seconds,
-        max_second=max_second,
-    )
-    label_counter: Counter = Counter()
     epoch_samples: list[EpochSample] = []
+    label_counter: Counter = Counter()
+
+    epoch_labels = build_epoch_labels(annotations, epoch_seconds, max_second=max_second)
+    epoch_labels = trim_edge_wake_epochs(epoch_labels, trim_wake_minutes)
 
     for epoch_index, (start_second, label) in enumerate(epoch_labels):
-        data = extract_epoch_array(
-            raw=raw,
-            channel_name=channel_name,
-            start_second=start_second,
-            epoch_seconds=epoch_seconds,
-        )
-
-        file_name = f"epoch_{epoch_index:05d}_{label}.npy"
-        save_path = subject_output_dir / file_name
+        data = extract_epoch_array(raw, channel_name, start_second, epoch_seconds)
+        save_path = subject_output_dir / f"epoch_{epoch_index:05d}_{label}.npy"
         np.save(save_path, data.astype(np.float32))
 
         epoch_samples.append(
@@ -240,8 +207,9 @@ def process_record_pair(
                 label=label,
                 n_samples=int(data.shape[0]),
                 channel_name=channel_name,
-                # manifest 中统一使用 /，避免 Windows 生成的数据到 Linux 上无法直接读取。
+                # manifest 里统一使用 /，避免跨平台路径问题。
                 relative_data_path=save_path.relative_to(output_dir.parent).as_posix(),
+                participant_id=participant_id,
             )
         )
         label_counter[label] += 1
@@ -250,12 +218,6 @@ def process_record_pair(
 
 
 def save_manifest(samples: list[EpochSample], output_dir: Path) -> Path:
-    """保存所有 epoch 的索引文件。
-
-    后续写 PyTorch Dataset 时，可以直接读这个 manifest，
-    不需要重新扫描目录。
-    """
-
     manifest_path = output_dir / "manifest.json"
     with manifest_path.open("w", encoding="utf-8") as file:
         json.dump([asdict(sample) for sample in samples], file, ensure_ascii=False, indent=2)
@@ -263,8 +225,6 @@ def save_manifest(samples: list[EpochSample], output_dir: Path) -> Path:
 
 
 def save_summary(all_label_counts: Counter, output_dir: Path) -> Path:
-    """保存标签统计信息，方便先检查类别分布是否合理。"""
-
     summary_path = output_dir / "summary.json"
     with summary_path.open("w", encoding="utf-8") as file:
         json.dump(dict(all_label_counts), file, ensure_ascii=False, indent=2)
@@ -272,29 +232,17 @@ def save_summary(all_label_counts: Counter, output_dir: Path) -> Path:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Sleep-EDF 子集预处理脚本")
-    parser.add_argument(
-        "--input-dir",
-        default="data/raw/sleep_edf_subset",
-        help="原始 Sleep-EDF 子集目录",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default="data/processed/sleep_edf_subset",
-        help="处理后数据输出目录",
-    )
-    parser.add_argument(
-        "--epoch-seconds",
-        type=int,
-        default=DEFAULT_EPOCH_SECONDS,
-        help="epoch 时长，默认 30 秒",
-    )
+    parser = argparse.ArgumentParser(description="Sleep-EDF 预处理脚本")
+    parser.add_argument("--input-dir", default="data/raw/sleep_edf_subset", help="原始 Sleep-EDF 目录")
+    parser.add_argument("--output-dir", default="data/processed/sleep_edf_subset", help="预处理输出目录")
+    parser.add_argument("--epoch-seconds", type=int, default=DEFAULT_EPOCH_SECONDS, help="epoch 长度，默认 30 秒")
+    parser.add_argument("--channel", choices=["Fpz-Cz", "Pz-Oz"], default=None, help="显式指定 EEG 通道")
+    parser.add_argument("--trim-wake-minutes", type=int, default=0, help="仅保留睡眠前后多少分钟的清醒 W")
     return parser
 
 
 def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
+    args = build_parser().parse_args()
 
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
@@ -307,27 +255,28 @@ def main() -> None:
     all_samples: list[EpochSample] = []
     all_label_counts: Counter = Counter()
 
-    print(f"找到 {len(record_pairs)} 组记录，开始预处理。")
-
+    print(f"找到 {len(record_pairs)} 组记录，开始预处理")
     for pair in record_pairs:
         print(f"处理被试：{pair.subject_id}")
         samples, label_counts = process_record_pair(
-            pair=pair,
-            output_dir=output_dir,
-            epoch_seconds=args.epoch_seconds,
+            pair,
+            output_dir,
+            args.epoch_seconds,
+            preferred_channel=args.channel,
+            trim_wake_minutes=args.trim_wake_minutes,
         )
         all_samples.extend(samples)
         all_label_counts.update(label_counts)
-        print(f"- 生成 {len(samples)} 个 epoch")
+        print(f"- 生成 epoch 数：{len(samples)}")
         print(f"- 标签分布：{dict(label_counts)}")
 
     manifest_path = save_manifest(all_samples, output_dir)
     summary_path = save_summary(all_label_counts, output_dir)
 
-    print("预处理完成。")
-    print(f"- manifest：{manifest_path}")
-    print(f"- summary：{summary_path}")
-    print(f"- 总 epoch 数：{len(all_samples)}")
+    print("预处理完成")
+    print(f"- manifest: {manifest_path}")
+    print(f"- summary: {summary_path}")
+    print(f"- 总 epoch 数: {len(all_samples)}")
 
 
 if __name__ == "__main__":

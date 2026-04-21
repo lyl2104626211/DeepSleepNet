@@ -17,11 +17,7 @@ class DatasetSummary:
 
 
 class SleepEDFDatasetBuilder:
-    """Sleep-EDF 数据入口。
-
-    第一轮只负责校验目录和整理后续需要实现的步骤，
-    不在这里直接写死下载或复杂预处理逻辑。
-    """
+    """这里只做最基本的数据目录检查和流程说明。"""
 
     def __init__(self, config: DatasetConfig) -> None:
         self.config = config
@@ -40,23 +36,24 @@ class SleepEDFDatasetBuilder:
 
     def validate_layout(self) -> list[str]:
         issues: list[str] = []
+
         if not self.raw_dir.exists():
             issues.append(f"原始数据目录不存在：{self.raw_dir}")
         if not self.processed_dir.exists():
             issues.append(f"处理后数据目录不存在：{self.processed_dir}")
         if self.config.epoch_seconds != 30:
-            issues.append("当前配置的 epoch_seconds 不是 30，需确认是否符合论文设置")
+            issues.append("当前 epoch_seconds 不是 30，请确认是否符合 DeepSleepNet 设置")
         if self.config.split_mode != "cross_subject":
-            issues.append("当前 split_mode 不是 cross_subject，需确认是否符合复现目标")
+            issues.append("当前 split_mode 不是 cross_subject，请确认是否符合实验目标")
+
         return issues
 
     def planned_steps(self) -> list[str]:
         return [
-            "准备 Sleep-EDF 原始 PSG/标注文件",
-            "读取单通道 EEG",
-            "按 30 秒切分 epoch",
-            "构建 W/N1/N2/N3/REM 标签映射",
-            "按被试划分 train/val/test 或交叉验证折",
-            "保存处理后的样本索引",
+            "准备 Sleep-EDF 原始 PSG 和标注文件",
+            "选择单通道 EEG",
+            "按 30 秒切成 epoch",
+            "把原始标注映射到 W/N1/N2/N3/REM",
+            "按被试切 train/val/test",
+            "保存 manifest 和 split 文件",
         ]
-

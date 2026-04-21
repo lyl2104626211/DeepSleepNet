@@ -16,6 +16,14 @@ training:
   epochs: 50
   learning_rate: 0.001
   seed: 42
+  stage2_batch_size: 8
+  stage2_epochs: 50
+  stage2_sequence_length: 25
+  stage2_sequence_stride: 25
+  stage2_eval_stride: 1
+  stage2_cnn_learning_rate: 0.0001
+  stage2_sequence_learning_rate: 0.001
+  stage2_gradient_clip_norm: 5.0
 
 evaluation:
   metrics: [accuracy, macro_f1, cohen_kappa]

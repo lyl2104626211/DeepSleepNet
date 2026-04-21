@@ -1,9 +1,9 @@
-experiment_name: deepsleepnet_stage1_full
+experiment_name: deepsleepnet_sleep_edf_paper_fpz_cz
 
 dataset:
   name: sleep_edf
   raw_dir: data/raw/sleep_edf_sleep_cassette
-  processed_dir: data/processed/sleep_edf_sleep_cassette
+  processed_dir: data/processed/sleep_edf_paper_fpz_cz
   label_set: [W, N1, N2, N3, REM]
   epoch_seconds: 30
   split_mode: cross_subject
@@ -12,24 +12,24 @@ model:
   name: deepsleepnet_baseline
 
 training:
-  batch_size: 128
-  epochs: 50
-  learning_rate: 0.001
+  batch_size: 100
+  epochs: 100
+  learning_rate: 0.0001
   seed: 42
   num_workers: 8
   pin_memory: true
-  stage2_batch_size: 8
-  stage2_epochs: 50
+  stage2_batch_size: 10
+  stage2_epochs: 200
   stage2_sequence_length: 25
   stage2_sequence_stride: 25
   stage2_eval_stride: 1
-  stage2_cnn_learning_rate: 0.0001
-  stage2_sequence_learning_rate: 0.001
-  stage2_gradient_clip_norm: 5.0
+  stage2_cnn_learning_rate: 0.000001
+  stage2_sequence_learning_rate: 0.0001
+  stage2_gradient_clip_norm: 10.0
 
 evaluation:
   metrics: [accuracy, macro_f1, cohen_kappa]
   save_confusion_matrix: true
 
 output:
-  result_dir: results/deepsleepnet_stage1_full
+  result_dir: results/deepsleepnet_sleep_edf_paper_fpz_cz

@@ -28,6 +28,14 @@ class TrainingConfig:
     seed: int
     num_workers: int = 0
     pin_memory: bool = False
+    stage2_batch_size: int | None = None
+    stage2_epochs: int | None = None
+    stage2_sequence_length: int = 25
+    stage2_sequence_stride: int | None = None
+    stage2_eval_stride: int = 1
+    stage2_cnn_learning_rate: float | None = None
+    stage2_sequence_learning_rate: float | None = None
+    stage2_gradient_clip_norm: float | None = None
 
 
 @dataclass
@@ -55,9 +63,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     try:
         import yaml
     except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "缺少 PyYAML，请先安装依赖后再读取配置：uv sync"
-        ) from exc
+        raise RuntimeError("缺少 PyYAML，请先安装依赖：uv sync") from exc
 
     with path.open("r", encoding="utf-8") as file:
         data = yaml.safe_load(file)
@@ -68,8 +74,9 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
-    config_path = Path(path)
-    raw = _read_yaml(config_path)
+    """把 yaml 直接读成项目里用到的配置对象。"""
+
+    raw = _read_yaml(Path(path))
     return ExperimentConfig(
         experiment_name=raw["experiment_name"],
         dataset=DatasetConfig(**raw["dataset"]),
