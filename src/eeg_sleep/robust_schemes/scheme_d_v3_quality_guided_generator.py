@@ -71,16 +71,16 @@ class ResidualEOGGenerator(nn.Module):
 
 
 class ResidualQualityFusion(nn.Module):
-    """Fuse EEG, trusted real EOG, generated EOG, and quality score.
+    """Lightweight residual fusion over EEG, final EOG, and quality score.
 
-    Raw real EOG features are never passed directly to the fusion MLP. They are
-    first gated by the quality score, so low-quality EOG artifacts cannot bypass
-    the quality-guided fusion path.
+    The fusion MLP only receives the already gated EOG feature. This keeps the
+    module smaller and avoids passing redundant real/fake EOG branches through
+    a randomly initialized high-dimensional fusion layer.
     """
 
     def __init__(self, feature_dim: int, dropout: float = 0.1, residual_logit_init: float = -10.0) -> None:
         super().__init__()
-        fusion_dim = feature_dim * 4 + 1
+        fusion_dim = feature_dim * 2 + 1
         self.delta = nn.Sequential(
             nn.Linear(fusion_dim, feature_dim),
             nn.GELU(),
@@ -97,9 +97,7 @@ class ResidualQualityFusion(nn.Module):
         quality: torch.Tensor,
     ) -> torch.Tensor:
         eog_final = quality * real_eog_features + (1.0 - quality) * fake_eog_features
-        trusted_real_eog = quality * real_eog_features
-        backup_fake_eog = (1.0 - quality) * fake_eog_features
-        fusion_inputs = torch.cat([eeg_features, trusted_real_eog, backup_fake_eog, eog_final, quality], dim=-1)
+        fusion_inputs = torch.cat([eeg_features, eog_final, quality], dim=-1)
         gamma = torch.sigmoid(self.residual_logit)
         return eeg_features + gamma * self.delta(fusion_inputs)
 
@@ -110,8 +108,8 @@ class QualityGuidedGeneratorV3FeatureNet(nn.Module):
     v3 keeps the same plug-in point as v1/v2, but upgrades the robust module:
     - continuous rule-based quality score c in [0, 1];
     - LayerNorm residual EEG->EOG feature generator;
-    - residual fusion MLP conditioned on EEG, real EOG, fake EOG, final EOG,
-      and quality score.
+    - lightweight residual fusion MLP conditioned on EEG, gated final EOG, and
+      quality score.
     """
 
     uses_internal_eog_dropout = True
@@ -121,8 +119,8 @@ class QualityGuidedGeneratorV3FeatureNet(nn.Module):
         input_size: int = 3000,
         n_classes: int = 5,
         dropout: float = 0.5,
-        generator_mse_loss_weight: float = 0.1,
-        generator_cosine_loss_weight: float = 0.1,
+        generator_mse_loss_weight: float = 0.01,
+        generator_cosine_loss_weight: float = 0.01,
         eog_dropout_prob: float = 0.0,
         eog_channel_index: int = 1,
     ) -> None:
@@ -206,8 +204,8 @@ class QualityGuidedGeneratorV3DeepSleepNet(nn.Module):
         return_last: bool = False,
         feature_dropout: float = 0.5,
         sequence_dropout: float = 0.5,
-        generator_mse_loss_weight: float = 0.1,
-        generator_cosine_loss_weight: float = 0.1,
+        generator_mse_loss_weight: float = 0.01,
+        generator_cosine_loss_weight: float = 0.01,
         eog_dropout_prob: float = 0.0,
         eog_channel_index: int = 1,
     ) -> None:
