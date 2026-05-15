@@ -28,7 +28,7 @@ def _compute_same_padding(length: int, kernel_size: int, stride: int, dilation: 
 
 
 class SamePadConv1d(nn.Module):
-    """保持和原始 TensorFlow 实现一致的 SAME padding 卷积。"""
+    """保持与原始 TensorFlow 实现一致的 SAME padding 卷积。"""
 
     def __init__(
         self,
@@ -60,7 +60,7 @@ class SamePadConv1d(nn.Module):
 
 
 class SamePadMaxPool1d(nn.Module):
-    """保持和原始 TensorFlow 实现一致的 SAME padding 池化。"""
+    """保持与原始 TensorFlow 实现一致的 SAME padding 池化。"""
 
     def __init__(self, kernel_size: int, stride: int) -> None:
         super().__init__()
@@ -79,7 +79,7 @@ class SamePadMaxPool1d(nn.Module):
 
 
 class ConvBnReluBlock(nn.Module):
-    """卷积主干最基础的一个块。"""
+    """卷积 + BN + ReLU 的基础块。"""
 
     def __init__(
         self,
@@ -106,10 +106,11 @@ class ConvBnReluBlock(nn.Module):
 
 
 class CNNBranch(nn.Module):
-    """DeepSleepNet 的一个 CNN 分支。"""
+    """DeepSleepNet 的单个 CNN 分支。"""
 
     def __init__(
         self,
+        in_channels: int,
         first_kernel_size: int,
         first_stride: int,
         first_pool_size: int,
@@ -121,7 +122,7 @@ class CNNBranch(nn.Module):
     ) -> None:
         super().__init__()
         self.features = nn.Sequential(
-            ConvBnReluBlock(1, 64, first_kernel_size, first_stride),
+            ConvBnReluBlock(in_channels, 64, first_kernel_size, first_stride),
             SamePadMaxPool1d(first_pool_size, first_pool_stride),
             nn.Dropout(p=dropout),
             ConvBnReluBlock(64, 128, later_kernel_size, 1),
@@ -160,7 +161,7 @@ class PeepholeLSTMCell(nn.Module):
         hidden_state, cell_state = state
         gates = self.input_linear(inputs) + self.hidden_linear(hidden_state)
 
-        # 顺序保持和 TensorFlow v1 LSTMCell 一致：i, j, f, o。
+        # 顺序保持与 TensorFlow v1 LSTMCell 一致：i, j, f, o。
         input_gate, candidate_gate, forget_gate, output_gate = gates.chunk(4, dim=-1)
 
         input_gate = torch.sigmoid(input_gate + self.peephole_i * cell_state)
@@ -249,23 +250,24 @@ class StackedBidirectionalPeepholeLSTM(nn.Module):
 
 
 class DeepFeatureNet(nn.Module):
-    """第一阶段模型，只做单个 epoch 的特征提取和分类。
-    输入张量形状(B*Sequence,dim)
-    """
+    """Stage 1 模型，只做单个 epoch 的特征提取和分类。"""
 
     def __init__(
         self,
         input_size: int = 3000,
+        input_channels: int = 1,
         n_classes: int = 5,
         dropout: float = 0.5,
     ) -> None:
         super().__init__()
         self.input_size = input_size
+        self.input_channels = input_channels
         self.n_classes = n_classes
         self.dropout = nn.Dropout(p=dropout)
 
-        # 一个分支偏向短时间尺度，一个分支偏向长时间尺度。
+        # 保持原论文的双分支结构，只把输入通道数从固定 1 改成可配置。
         self.small_cnn = CNNBranch(
+            in_channels=input_channels,
             first_kernel_size=50,
             first_stride=6,
             first_pool_size=8,
@@ -276,6 +278,7 @@ class DeepFeatureNet(nn.Module):
             dropout=dropout,
         )
         self.large_cnn = CNNBranch(
+            in_channels=input_channels,
             first_kernel_size=400,
             first_stride=50,
             first_pool_size=4,
@@ -287,7 +290,7 @@ class DeepFeatureNet(nn.Module):
         )
 
         with torch.no_grad():
-            dummy_input = torch.zeros(1, 1, input_size)
+            dummy_input = torch.zeros(1, input_channels, input_size)
             small_dim = self.small_cnn(dummy_input).flatten(start_dim=1).shape[-1]
             large_dim = self.large_cnn(dummy_input).flatten(start_dim=1).shape[-1]
 
@@ -295,12 +298,13 @@ class DeepFeatureNet(nn.Module):
         self.classifier = nn.Linear(self.representation_dim, n_classes)
 
     def _prepare_inputs(self, inputs: torch.Tensor) -> torch.Tensor:
+        # 兼容旧的单通道 [B, L] 和新的多通道 [B, C, L]。
         if inputs.ndim == 2:
             return inputs.unsqueeze(1)
-        if inputs.ndim == 3 and inputs.shape[1] == 1:
+        if inputs.ndim == 3:
             return inputs
         raise ValueError(
-            f"DeepFeatureNet 期望输入形状是 [B, L] 或 [B, 1, L]，实际收到 {tuple(inputs.shape)}"
+            f"DeepFeatureNet 期望输入形状是 [B, L] 或 [B, C, L]，实际收到 {tuple(inputs.shape)}"
         )
 
     def extract_features(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -315,11 +319,12 @@ class DeepFeatureNet(nn.Module):
 
 
 class DeepSleepNet(nn.Module):
-    """完整的 DeepSleepNet，两阶段中的第二阶段模型。"""
+    """完整的 DeepSleepNet，对应 Stage 2 序列建模。"""
 
     def __init__(
         self,
         input_size: int = 3000,
+        input_channels: int = 1,
         n_classes: int = 5,
         seq_length: int = 25,
         n_rnn_layers: int = 2,
@@ -333,6 +338,7 @@ class DeepSleepNet(nn.Module):
 
         self.feature_extractor = DeepFeatureNet(
             input_size=input_size,
+            input_channels=input_channels,
             n_classes=n_classes,
             dropout=feature_dropout,
         )
@@ -351,19 +357,22 @@ class DeepSleepNet(nn.Module):
         self.classifier = nn.Linear(1024, n_classes)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        if inputs.ndim != 3:
+        # 兼容旧的 [B, S, L] 和新的 [B, S, C, L]。
+        if inputs.ndim == 3:
+            inputs = inputs.unsqueeze(2)
+        if inputs.ndim != 4:
             raise ValueError(
-                f"DeepSleepNet 期望输入形状是 [B, S, L]，实际收到 {tuple(inputs.shape)}"
+                f"DeepSleepNet 期望输入形状是 [B, S, L] 或 [B, S, C, L]，实际收到 {tuple(inputs.shape)}"
             )
 
-        batch_size, sequence_length, signal_length = inputs.shape
+        batch_size, sequence_length, input_channels, signal_length = inputs.shape
 
         # 先对每个 epoch 共享同一个 CNN 特征提取器。
-        flattened_inputs = inputs.reshape(batch_size * sequence_length, signal_length)
+        flattened_inputs = inputs.reshape(batch_size * sequence_length, input_channels, signal_length)
         epoch_features = self.feature_extractor.extract_features(flattened_inputs)
         shortcut_features = self.shortcut_projection(epoch_features)
 
-        # 再把特征还原成序列，交给双向 LSTM 建模上下文。
+        # 再把 epoch 特征还原成序列，交给双向 LSTM 建模上下文。
         sequence_inputs = epoch_features.reshape(batch_size, sequence_length, -1)
         sequence_outputs, _ = self.sequence_model(sequence_inputs)
 
@@ -378,23 +387,68 @@ class DeepSleepNet(nn.Module):
 
 
 def build_model_summary(config: ModelConfig) -> ModelSummary:
-    if config.name != "deepsleepnet_baseline":
-        raise ValueError(f"暂不支持的模型名称：{config.name}")
+    if config.name == "deepsleepnet_baseline":
+        return ModelSummary(
+            name=config.name,
+            description=(
+                "DeepSleepNet baseline：保留原论文的双分支 CNN + 双向 peephole LSTM 结构，"
+                "现已兼容单通道 EEG 和最小改动版多通道输入。"
+            ),
+        )
 
-    return ModelSummary(
-        name=config.name,
-        description=(
-            "DeepSleepNet baseline：输入是 30 秒、100 Hz 的单通道 EEG（3000 点）；"
-            "前端用双分支 CNN 提取短时和长时特征；"
-            "后端用 2 层双向 peephole LSTM 建模时序上下文；"
-            "最后把 shortcut 分支和时序输出相加，再做 5 分类。"
-        ),
-    )
+    if config.name == "deepsleepnet_gated_fusion":
+        return ModelSummary(
+            name=config.name,
+            description=(
+                "DeepSleepNet gated fusion：EEG 和 EOG 分支独立编码，"
+                "通过 sigmoid gate 控制 EOG 特征注入 EEG 主干。"
+            ),
+        )
+
+    if config.name == "deepsleepnet_mixture_fusion":
+        return ModelSummary(
+            name=config.name,
+            description=(
+                "DeepSleepNet mixture fusion：EEG 和 EOG 分支独立编码，"
+                "通过 softmax 权重动态融合两路特征。"
+            ),
+        )
+
+    if config.name == "deepsleepnet_quality_guided_generator":
+        return ModelSummary(
+            name=config.name,
+            description=(
+                "DeepSleepNet quality-guided generator：规则质量感知器判断 EOG 可靠性，"
+                "用 EEG 特征生成替代 EOG 特征，并在真实/生成 EOG 特征之间软切换。"
+            ),
+        )
+
+    if config.name == "deepsleepnet_quality_guided_generator_v2":
+        return ModelSummary(
+            name=config.name,
+            description=(
+                "DeepSleepNet quality-guided generator v2：在 v1 的质量感知和 EEG->EOG 特征生成基础上，"
+                "使用更小的生成器辅助损失，并通过可学习残差系数控制 EOG 特征注入强度。"
+            ),
+        )
+
+    if config.name == "deepsleepnet_quality_guided_generator_v3":
+        return ModelSummary(
+            name=config.name,
+            description=(
+                "DeepSleepNet quality-guided generator v3：使用连续质量分数、LayerNorm 残差式 EEG->EOG 生成器，"
+                "并通过条件残差融合 MLP 综合 EEG、真实 EOG、生成 EOG 和质量分数。"
+            ),
+        )
+
+    else:
+        raise ValueError(f"暂不支持的模型名称：{config.name}")
 
 
 def build_model(
     config: ModelConfig,
     input_size: int = 3000,
+    input_channels: int = 1,
     n_classes: int = 5,
     seq_length: int = 25,
 ) -> nn.Module:
@@ -403,6 +457,7 @@ def build_model(
 
     return DeepSleepNet(
         input_size=input_size,
+        input_channels=input_channels,
         n_classes=n_classes,
         seq_length=seq_length,
         n_rnn_layers=2,

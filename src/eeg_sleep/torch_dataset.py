@@ -35,8 +35,9 @@ class SampleRecord:
     start_second: float
     label: str
     n_samples: int
-    channel_name: str
     relative_data_path: str
+    channel_name: str | None = None
+    channel_names: list[str] | None = None
     participant_id: str | None = None
 
 
@@ -89,6 +90,22 @@ def _load_signal(np_module, data_root: Path, record: SampleRecord):
     return np_module.load(data_path).astype(np_module.float32)
 
 
+def _preload_subject_signals(
+    np_module,
+    data_root: Path,
+    subject_records: dict[str, list[SampleRecord]],
+) -> dict[str, object]:
+    """按 subject 预加载整晚信号，减少 stage2 反复打开小文件的开销。"""
+
+    return {
+        subject_id: np_module.stack(
+            [_load_signal(np_module, data_root, record) for record in records],
+            axis=0,
+        )
+        for subject_id, records in subject_records.items()
+    }
+
+
 def load_manifest(manifest_path: str | Path) -> list[SampleRecord]:
     """读取预处理生成的 manifest。"""
 
@@ -96,6 +113,9 @@ def load_manifest(manifest_path: str | Path) -> list[SampleRecord]:
     for record in _read_json(manifest_path):
         if "participant_id" not in record or record["participant_id"] is None:
             record["participant_id"] = infer_participant_id(record["subject_id"])
+        if "channel_names" not in record or record["channel_names"] is None:
+            channel_name = record.get("channel_name")
+            record["channel_names"] = [channel_name] if channel_name else None
         records.append(SampleRecord(**record))
     return records
 
@@ -297,6 +317,7 @@ class SleepEDFSequenceDataset:
         sequence_length: int = 25,
         stride: int | None = None,
         subject_ids: Iterable[str] | None = None,
+        cache_subject_signals: bool = True,
     ) -> None:
         if sequence_length <= 0:
             raise ValueError("sequence_length 必须大于 0")
@@ -305,6 +326,7 @@ class SleepEDFSequenceDataset:
         self.data_root = self.manifest_path.parent.parent
         self.sequence_length = sequence_length
         self.stride = stride if stride is not None else sequence_length
+        self.cache_subject_signals = cache_subject_signals
         self.np = _require_numpy()
 
         records = _filter_records(load_manifest(self.manifest_path), subject_ids)
@@ -312,9 +334,14 @@ class SleepEDFSequenceDataset:
             raise ValueError("筛选后的序列数据集为空，请检查 manifest 或 subject_ids")
 
         self.subject_records = group_records_by_subject(records)
-        self.sequences: list[list[SampleRecord]] = []
+        self.subject_signal_cache = (
+            _preload_subject_signals(self.np, self.data_root, self.subject_records)
+            if self.cache_subject_signals
+            else None
+        )
+        self.sequences: list[tuple[str, int]] = []
 
-        for subject_records in self.subject_records.values():
+        for subject_id, subject_records in self.subject_records.items():
             if len(subject_records) < self.sequence_length:
                 continue
 
@@ -322,7 +349,7 @@ class SleepEDFSequenceDataset:
             for start_idx in range(0, last_start, self.stride):
                 window = subject_records[start_idx:start_idx + self.sequence_length]
                 if self._is_contiguous(window):
-                    self.sequences.append(window)
+                    self.sequences.append((subject_id, start_idx))
 
         if not self.sequences:
             raise ValueError("没有可用的序列窗口，请减小 sequence_length 或检查数据完整性")
@@ -338,11 +365,17 @@ class SleepEDFSequenceDataset:
         return len(self.sequences)
 
     def __getitem__(self, index: int) -> dict:
-        window = self.sequences[index]
-        signals = self.np.stack(
-            [_load_signal(self.np, self.data_root, record) for record in window],
-            axis=0,
-        )
+        subject_id, start_idx = self.sequences[index]
+        subject_records = self.subject_records[subject_id]
+        window = subject_records[start_idx:start_idx + self.sequence_length]
+
+        if self.subject_signal_cache is not None:
+            signals = self.subject_signal_cache[subject_id][start_idx:start_idx + self.sequence_length]
+        else:
+            signals = self.np.stack(
+                [_load_signal(self.np, self.data_root, record) for record in window],
+                axis=0,
+            )
         labels = self.np.asarray(
             [LABEL_TO_ID[record.label] for record in window],
             dtype=self.np.int64,
@@ -385,6 +418,7 @@ def create_dataloader(
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
         collate_fn=collate_fn,
     )
 
@@ -416,5 +450,6 @@ def create_sequence_dataloader(
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
         collate_fn=collate_fn,
     )

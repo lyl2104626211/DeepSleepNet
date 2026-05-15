@@ -49,11 +49,12 @@ def train_stage1(
     split_path: str | Path,
     output_dir: str | Path | None = None,
     epochs_override: int | None = None,
+    eog_dropout_prob: float = 0.0,
+    eog_channel_index: int = 1,
 ):
     """训练 stage1 的单 epoch 分类器。"""
 
     torch, nn, Adam = _require_torch()
-    from .models import DeepFeatureNet
 
     _set_random_seed(config.training.seed)
 
@@ -87,10 +88,14 @@ def train_stage1(
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = DeepFeatureNet(
+    input_channels = _infer_input_channels(train_dataset[0]["signal"])
+    model = _build_stage1_model(
+        config=config,
         input_size=train_dataset[0]["signal"].shape[-1],
+        input_channels=input_channels,
         n_classes=len(config.dataset.label_set),
     ).to(device)
+    _configure_internal_eog_dropout(model, eog_dropout_prob, eog_channel_index)
     criterion = nn.CrossEntropyLoss()
     optimizer = Adam(model.parameters(), lr=config.training.learning_rate)
 
@@ -104,7 +109,16 @@ def train_stage1(
     best_macro_f1 = float("-inf")
 
     for epoch in range(1, total_epochs + 1):
-        train_loss = _train_stage1_one_epoch(model, train_loader, criterion, optimizer, device, epoch)
+        train_loss = _train_stage1_one_epoch(
+            model,
+            train_loader,
+            criterion,
+            optimizer,
+            device,
+            epoch,
+            eog_dropout_prob=eog_dropout_prob,
+            eog_channel_index=eog_channel_index,
+        )
         epoch_log = {
             "epoch": epoch,
             "train_loss": train_loss,
@@ -148,6 +162,8 @@ def train_stage1(
         "best_epoch": best_epoch,
         "best_val_macro_f1": _finalize_best_score(best_macro_f1),
         "checkpoint_path": str(checkpoint_path),
+        "eog_dropout_prob": eog_dropout_prob,
+        "eog_channel_index": eog_channel_index if eog_dropout_prob > 0 else None,
         "epochs": history,
     }
     _save_json(summary, summary_path)
@@ -161,11 +177,12 @@ def train_stage2(
     stage1_checkpoint_path: str | Path,
     output_dir: str | Path | None = None,
     epochs_override: int | None = None,
+    eog_dropout_prob: float = 0.0,
+    eog_channel_index: int = 1,
 ):
     """训练 stage2 的序列模型，并加载 stage1 的特征提取器权重。"""
 
     torch, nn, _ = _require_torch()
-    from .models import DeepSleepNet
 
     _set_random_seed(config.training.seed)
 
@@ -215,13 +232,15 @@ def train_stage2(
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = DeepSleepNet(
+    input_channels = _infer_input_channels(train_dataset[0]["signals"][0])
+    model = _build_stage2_model(
+        config=config,
         input_size=train_dataset[0]["signals"].shape[-1],
+        input_channels=input_channels,
         n_classes=len(config.dataset.label_set),
-        seq_length=sequence_length,
-        n_rnn_layers=2,
-        return_last=False,
+        sequence_length=sequence_length,
     ).to(device)
+    _configure_internal_eog_dropout(model, eog_dropout_prob, eog_channel_index)
     _load_stage1_weights(model, stage1_checkpoint_path)
 
     criterion = nn.CrossEntropyLoss()
@@ -245,6 +264,8 @@ def train_stage2(
             device=device,
             epoch=epoch,
             clip_norm=clip_norm,
+            eog_dropout_prob=eog_dropout_prob,
+            eog_channel_index=eog_channel_index,
         )
         epoch_log = {
             "epoch": epoch,
@@ -300,6 +321,8 @@ def train_stage2(
         "best_epoch": best_epoch,
         "best_val_macro_f1": _finalize_best_score(best_macro_f1),
         "checkpoint_path": str(checkpoint_path),
+        "eog_dropout_prob": eog_dropout_prob,
+        "eog_channel_index": eog_channel_index if eog_dropout_prob > 0 else None,
         "epochs": history,
     }
     _save_json(summary, summary_path)
@@ -313,11 +336,12 @@ def evaluate_stage2(
     checkpoint_path: str | Path,
     subset: str = "test",
     output_dir: str | Path | None = None,
+    mask_eog: bool = False,
+    eog_channel_index: int = 1,
 ):
     """评估 stage2 模型，并按需导出混淆矩阵。"""
 
     torch, nn, _ = _require_torch()
-    from .models import DeepSleepNet
 
     split = load_subject_split(split_path)
     subject_ids = {
@@ -348,13 +372,15 @@ def evaluate_stage2(
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = DeepSleepNet(
+    input_channels = _infer_input_channels(dataset[0]["signals"][0])
+    model = _build_stage2_model(
+        config=config,
         input_size=dataset[0]["signals"].shape[-1],
+        input_channels=input_channels,
         n_classes=len(config.dataset.label_set),
-        seq_length=sequence_length,
-        n_rnn_layers=2,
-        return_last=False,
+        sequence_length=sequence_length,
     ).to(device)
+    _configure_internal_eog_dropout(model, 0.0, eog_channel_index)
     _load_checkpoint(model, checkpoint_path)
 
     result = _evaluate_sequence_model(
@@ -363,6 +389,7 @@ def evaluate_stage2(
         nn.CrossEntropyLoss(),
         device,
         f"Evaluate [{subset}]",
+        zero_channel_indices=[eog_channel_index] if mask_eog else None,
     )
 
     result_dir = _resolve_result_dir(config, output_dir, "stage2")
@@ -384,6 +411,10 @@ def evaluate_stage2(
         "accuracy": result["accuracy"],
         "macro_f1": result["macro_f1"],
         "cohen_kappa": result["cohen_kappa"],
+        "input_perturbation": {
+            "mask_eog": mask_eog,
+            "eog_channel_index": eog_channel_index if mask_eog else None,
+        },
         "summary_path": str(summary_path),
         "confusion_matrix_path": None if confusion_matrix_path is None else str(confusion_matrix_path),
     }
@@ -461,6 +492,188 @@ def _resolve_stage2_batch_size(config: ExperimentConfig) -> int:
     """stage2 默认 batch 更小，避免直接复用 stage1 的较大 batch。"""
 
     return config.training.stage2_batch_size or max(1, min(config.training.batch_size, 8))
+
+
+def _infer_input_channels(signal) -> int:
+    """兼容旧的单通道 [L] 和新的多通道 [C, L] 样本格式。"""
+
+    return int(signal.shape[0]) if getattr(signal, "ndim", 0) == 2 else 1
+
+
+def _build_stage1_model(
+    config: ExperimentConfig,
+    input_size: int,
+    input_channels: int,
+    n_classes: int,
+):
+    """按配置构建 stage1 模型。"""
+
+    if config.model.name == "deepsleepnet_baseline":
+        from .models import DeepFeatureNet
+
+        return DeepFeatureNet(
+            input_size=input_size,
+            input_channels=input_channels,
+            n_classes=n_classes,
+        )
+
+    if config.model.name == "deepsleepnet_gated_fusion":
+        if input_channels < 2:
+            raise ValueError("deepsleepnet_gated_fusion 需要 EEG+EOG 双通道输入")
+        from .robust_schemes.scheme_b_gated_fusion import GatedFusionFeatureNet
+
+        return GatedFusionFeatureNet(
+            input_size=input_size,
+            n_classes=n_classes,
+        )
+
+    if config.model.name == "deepsleepnet_mixture_fusion":
+        if input_channels < 2:
+            raise ValueError("deepsleepnet_mixture_fusion 需要 EEG+EOG 双通道输入")
+        from .robust_schemes.scheme_c_mixture_fusion import MixtureFusionFeatureNet
+
+        return MixtureFusionFeatureNet(
+            input_size=input_size,
+            n_classes=n_classes,
+        )
+
+    if config.model.name == "deepsleepnet_quality_guided_generator":
+        if input_channels < 2:
+            raise ValueError("deepsleepnet_quality_guided_generator 需要 EEG+EOG 双通道输入")
+        from .robust_schemes.scheme_d_quality_guided_generator import QualityGuidedGeneratorFeatureNet
+
+        return QualityGuidedGeneratorFeatureNet(
+            input_size=input_size,
+            n_classes=n_classes,
+        )
+
+    if config.model.name == "deepsleepnet_quality_guided_generator_v2":
+        if input_channels < 2:
+            raise ValueError("deepsleepnet_quality_guided_generator_v2 需要 EEG+EOG 双通道输入")
+        from .robust_schemes.scheme_d_v2_quality_guided_generator import QualityGuidedGeneratorV2FeatureNet
+
+        return QualityGuidedGeneratorV2FeatureNet(
+            input_size=input_size,
+            n_classes=n_classes,
+        )
+
+    if config.model.name == "deepsleepnet_quality_guided_generator_v3":
+        if input_channels < 2:
+            raise ValueError("deepsleepnet_quality_guided_generator_v3 需要 EEG+EOG 双通道输入")
+        from .robust_schemes.scheme_d_v3_quality_guided_generator import QualityGuidedGeneratorV3FeatureNet
+
+        return QualityGuidedGeneratorV3FeatureNet(
+            input_size=input_size,
+            n_classes=n_classes,
+        )
+
+    raise ValueError(f"暂不支持的模型名称：{config.model.name}")
+
+
+def _build_stage2_model(
+    config: ExperimentConfig,
+    input_size: int,
+    input_channels: int,
+    n_classes: int,
+    sequence_length: int,
+):
+    """按配置构建 stage2 模型。"""
+
+    if config.model.name == "deepsleepnet_baseline":
+        from .models import DeepSleepNet
+
+        return DeepSleepNet(
+            input_size=input_size,
+            input_channels=input_channels,
+            n_classes=n_classes,
+            seq_length=sequence_length,
+            n_rnn_layers=2,
+            return_last=False,
+        )
+
+    if config.model.name == "deepsleepnet_gated_fusion":
+        if input_channels < 2:
+            raise ValueError("deepsleepnet_gated_fusion 需要 EEG+EOG 双通道输入")
+        from .robust_schemes.scheme_b_gated_fusion import GatedFusionDeepSleepNet
+
+        return GatedFusionDeepSleepNet(
+            input_size=input_size,
+            n_classes=n_classes,
+            seq_length=sequence_length,
+            n_rnn_layers=2,
+            return_last=False,
+        )
+
+    if config.model.name == "deepsleepnet_mixture_fusion":
+        if input_channels < 2:
+            raise ValueError("deepsleepnet_mixture_fusion 需要 EEG+EOG 双通道输入")
+        from .robust_schemes.scheme_c_mixture_fusion import MixtureFusionDeepSleepNet
+
+        return MixtureFusionDeepSleepNet(
+            input_size=input_size,
+            n_classes=n_classes,
+            seq_length=sequence_length,
+            n_rnn_layers=2,
+            return_last=False,
+        )
+
+    if config.model.name == "deepsleepnet_quality_guided_generator":
+        if input_channels < 2:
+            raise ValueError("deepsleepnet_quality_guided_generator 需要 EEG+EOG 双通道输入")
+        from .robust_schemes.scheme_d_quality_guided_generator import QualityGuidedGeneratorDeepSleepNet
+
+        return QualityGuidedGeneratorDeepSleepNet(
+            input_size=input_size,
+            n_classes=n_classes,
+            seq_length=sequence_length,
+            n_rnn_layers=2,
+            return_last=False,
+        )
+
+    if config.model.name == "deepsleepnet_quality_guided_generator_v2":
+        if input_channels < 2:
+            raise ValueError("deepsleepnet_quality_guided_generator_v2 需要 EEG+EOG 双通道输入")
+        from .robust_schemes.scheme_d_v2_quality_guided_generator import QualityGuidedGeneratorV2DeepSleepNet
+
+        return QualityGuidedGeneratorV2DeepSleepNet(
+            input_size=input_size,
+            n_classes=n_classes,
+            seq_length=sequence_length,
+            n_rnn_layers=2,
+            return_last=False,
+        )
+
+    if config.model.name == "deepsleepnet_quality_guided_generator_v3":
+        if input_channels < 2:
+            raise ValueError("deepsleepnet_quality_guided_generator_v3 需要 EEG+EOG 双通道输入")
+        from .robust_schemes.scheme_d_v3_quality_guided_generator import QualityGuidedGeneratorV3DeepSleepNet
+
+        return QualityGuidedGeneratorV3DeepSleepNet(
+            input_size=input_size,
+            n_classes=n_classes,
+            seq_length=sequence_length,
+            n_rnn_layers=2,
+            return_last=False,
+        )
+
+    raise ValueError(f"暂不支持的模型名称：{config.model.name}")
+
+
+def _configure_internal_eog_dropout(model, dropout_prob: float, eog_channel_index: int) -> None:
+    if hasattr(model, "set_eog_dropout"):
+        model.set_eog_dropout(dropout_prob, eog_channel_index)
+
+
+def _uses_internal_eog_dropout(model) -> bool:
+    return bool(getattr(model, "uses_internal_eog_dropout", False))
+
+
+def _unpack_model_output(output):
+    if isinstance(output, tuple):
+        logits = output[0]
+        auxiliary_loss = output[1] if len(output) > 1 else None
+        return logits, auxiliary_loss
+    return output, None
 
 
 def _update_best_checkpoint(
@@ -581,26 +794,62 @@ def _load_state_dict_from_checkpoint(checkpoint_path: str | Path) -> dict:
 
 
 def _build_stage2_optimizer(model, config: ExperimentConfig):
-    """stage2 采用分组学习率：CNN 小一些，时序部分大一些。"""
+    """stage2 采用分组学习率。
+
+    已有 CNN encoder 用较小学习率微调；BiLSTM/classifier 用较大学习率。
+    对鲁棒模块，generator/fusion 是 stage2 仍需充分学习的新模块，不能跟
+    encoder 一起被 1e-6 级别学习率冻结，因此单独放到较大学习率组。
+    """
 
     _, _, Adam = _require_torch()
     cnn_lr = config.training.stage2_cnn_learning_rate or config.training.learning_rate * 0.1
     seq_lr = config.training.stage2_sequence_learning_rate or config.training.learning_rate
+    robust_lr = seq_lr
 
-    return Adam(
-        [
-            {"params": model.feature_extractor.parameters(), "lr": cnn_lr},
-            {
-                "params": list(model.shortcut_projection.parameters())
-                + list(model.sequence_model.parameters())
-                + list(model.classifier.parameters()),
-                "lr": seq_lr,
-            },
-        ]
+    feature_params = []
+    robust_params = []
+    for name, parameter in model.feature_extractor.named_parameters():
+        if _is_robust_module_parameter(name):
+            robust_params.append(parameter)
+        else:
+            feature_params.append(parameter)
+
+    param_groups = []
+    if feature_params:
+        param_groups.append({"params": feature_params, "lr": cnn_lr})
+    if robust_params:
+        param_groups.append({"params": robust_params, "lr": robust_lr})
+    param_groups.append(
+        {
+            "params": list(model.shortcut_projection.parameters())
+            + list(model.sequence_model.parameters())
+            + list(model.classifier.parameters()),
+            "lr": seq_lr,
+        }
+    )
+
+    return Adam(param_groups)
+
+
+def _is_robust_module_parameter(name: str) -> bool:
+    return (
+        name.startswith("generator.")
+        or name.startswith("fusion.")
+        or name.startswith("quality_sensor.")
+        or "residual_logit" in name
     )
 
 
-def _train_stage1_one_epoch(model, dataloader, criterion, optimizer, device, epoch: int) -> float:
+def _train_stage1_one_epoch(
+    model,
+    dataloader,
+    criterion,
+    optimizer,
+    device,
+    epoch: int,
+    eog_dropout_prob: float = 0.0,
+    eog_channel_index: int = 1,
+) -> float:
     """执行一轮 stage1 训练，并返回样本级平均 loss。"""
 
     model.train()
@@ -610,10 +859,15 @@ def _train_stage1_one_epoch(model, dataloader, criterion, optimizer, device, epo
     progress = _make_progress(dataloader, len(dataloader), f"Epoch {epoch} [train]")
     for batch in progress:
         signals = batch["signals"].to(device)
+        if not _uses_internal_eog_dropout(model):
+            signals = _apply_random_channel_dropout(signals, eog_channel_index, eog_dropout_prob)
         labels = batch["labels"].to(device)
 
         optimizer.zero_grad()
-        loss = criterion(model(signals), labels)
+        logits, auxiliary_loss = _unpack_model_output(model(signals))
+        loss = criterion(logits, labels)
+        if auxiliary_loss is not None:
+            loss = loss + auxiliary_loss
         loss.backward()
         optimizer.step()
 
@@ -627,7 +881,17 @@ def _train_stage1_one_epoch(model, dataloader, criterion, optimizer, device, epo
     return total_loss / max(total_samples, 1)
 
 
-def _train_stage2_one_epoch(model, dataloader, criterion, optimizer, device, epoch: int, clip_norm: float | None) -> float:
+def _train_stage2_one_epoch(
+    model,
+    dataloader,
+    criterion,
+    optimizer,
+    device,
+    epoch: int,
+    clip_norm: float | None,
+    eog_dropout_prob: float = 0.0,
+    eog_channel_index: int = 1,
+) -> float:
     """执行一轮 stage2 训练，并返回 token 级平均 loss。"""
 
     torch, _, _ = _require_torch()
@@ -638,11 +902,15 @@ def _train_stage2_one_epoch(model, dataloader, criterion, optimizer, device, epo
     progress = _make_progress(dataloader, len(dataloader), f"Epoch {epoch} [stage2-train]")
     for batch in progress:
         signals = batch["signals"].to(device)
+        if not _uses_internal_eog_dropout(model):
+            signals = _apply_random_channel_dropout(signals, eog_channel_index, eog_dropout_prob)
         labels = batch["labels"].to(device)
 
         optimizer.zero_grad()
-        logits = model(signals)
+        logits, auxiliary_loss = _unpack_model_output(model(signals))
         loss = criterion(logits.reshape(-1, logits.shape[-1]), labels.reshape(-1))
+        if auxiliary_loss is not None:
+            loss = loss + auxiliary_loss
         loss.backward()
 
         if clip_norm is not None:
@@ -675,7 +943,7 @@ def _evaluate_epoch_model(model, dataloader, criterion, device, description: str
         for batch in progress:
             signals = batch["signals"].to(device)
             labels = batch["labels"].to(device)
-            logits = model(signals)
+            logits, _ = _unpack_model_output(model(signals))
             loss = criterion(logits, labels)
 
             batch_size = labels.shape[0]
@@ -696,7 +964,14 @@ def _evaluate_epoch_model(model, dataloader, criterion, device, description: str
     }
 
 
-def _evaluate_sequence_model(model, dataloader, criterion, device, description: str) -> dict:
+def _evaluate_sequence_model(
+    model,
+    dataloader,
+    criterion,
+    device,
+    description: str,
+    zero_channel_indices: list[int] | None = None,
+) -> dict:
     """评估 stage2 模型，并把重叠窗口的预测重新聚合到 epoch 级。"""
 
     torch, _, _ = _require_torch()
@@ -710,8 +985,10 @@ def _evaluate_sequence_model(model, dataloader, criterion, device, description: 
         progress = _make_progress(dataloader, len(dataloader), description)
         for batch in progress:
             signals = batch["signals"].to(device)
+            if zero_channel_indices:
+                signals = _zero_signal_channels(signals, zero_channel_indices)
             labels = batch["labels"].to(device)
-            logits = model(signals)
+            logits, _ = _unpack_model_output(model(signals))
             loss = criterion(logits.reshape(-1, logits.shape[-1]), labels.reshape(-1))
 
             token_count = int(labels.numel())
@@ -747,6 +1024,51 @@ def _evaluate_sequence_model(model, dataloader, criterion, device, description: 
         "y_true": y_true,
         "y_pred": y_pred,
     }
+
+
+def _zero_signal_channels(signals, channel_indices: list[int]):
+    """测试时模拟某些通道脱落；当前序列输入格式应为 [B, S, C, L]。"""
+
+    if signals.ndim != 4:
+        raise ValueError("zero_channel_indices 只支持多通道序列输入 [B, S, C, L]")
+
+    num_channels = int(signals.shape[2])
+    normalized_indices = []
+    for channel_index in channel_indices:
+        if not 0 <= channel_index < num_channels:
+            raise ValueError(f"channel index {channel_index} 超出范围，当前通道数为 {num_channels}")
+        normalized_indices.append(channel_index)
+
+    masked = signals.clone()
+    masked[:, :, normalized_indices, :] = 0
+    return masked
+
+
+def _apply_random_channel_dropout(signals, channel_index: int, dropout_prob: float):
+    """训练时随机遮住指定通道；stage1 输入为 [B, C, L]，stage2 输入为 [B, S, C, L]。"""
+
+    if dropout_prob <= 0:
+        return signals
+    if dropout_prob > 1:
+        raise ValueError("dropout_prob 必须在 [0, 1] 范围内")
+    if signals.ndim not in {3, 4}:
+        raise ValueError("EOG dropout 只支持多通道输入 [B, C, L] 或 [B, S, C, L]")
+
+    channel_dim = 1 if signals.ndim == 3 else 2
+    num_channels = int(signals.shape[channel_dim])
+    if not 0 <= channel_index < num_channels:
+        raise ValueError(f"channel index {channel_index} 超出范围，当前通道数为 {num_channels}")
+
+    if signals.ndim == 3:
+        drop_mask = signals.new_empty((signals.shape[0], 1, 1)).bernoulli_(dropout_prob).bool()
+        masked = signals.clone()
+        masked[:, channel_index:channel_index + 1, :] = masked[:, channel_index:channel_index + 1, :].masked_fill(drop_mask, 0)
+        return masked
+
+    drop_mask = signals.new_empty((signals.shape[0], 1, 1, 1)).bernoulli_(dropout_prob).bool()
+    masked = signals.clone()
+    masked[:, :, channel_index:channel_index + 1, :] = masked[:, :, channel_index:channel_index + 1, :].masked_fill(drop_mask, 0)
+    return masked
 
 
 def _print_stage1_epoch(epoch_log: dict, epoch: int, total_epochs: int) -> None:

@@ -8,6 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+.uv-cache/
+.uv-eval-env/
+.uv-python/
 
 # IDE and local project files
 .idea/
@@ -15,6 +18,13 @@ wheels/
 # Local datasets and outputs
 data/
 results/
+tmp/
+*.pt
+*.pth
+*.ckpt
+*.tar.gz
+*.zip
+*.log
 
-# Conversation logs
-conversation_*.txt
+# Local paper PDFs; keep summaries/notes in git
+paper/*.pdf

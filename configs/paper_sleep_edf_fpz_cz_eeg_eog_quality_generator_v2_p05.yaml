@@ -1,15 +1,15 @@
-experiment_name: deepsleepnet_sleep_edf_paper_fpz_cz
+experiment_name: deepsleepnet_sleep_edf_paper_fpz_cz_eeg_eog_quality_generator_v2_p05
 
 dataset:
   name: sleep_edf
   raw_dir: data/raw/sleep_edf_sleep_cassette
-  processed_dir: data/processed/sleep_edf_paper_fpz_cz
+  processed_dir: data/processed/sleep_edf_paper_fpz_cz_eeg_eog
   label_set: [W, N1, N2, N3, REM]
   epoch_seconds: 30
   split_mode: cross_subject
 
 model:
-  name: deepsleepnet_baseline
+  name: deepsleepnet_quality_guided_generator_v2
 
 training:
   batch_size: 512
@@ -32,4 +32,4 @@ evaluation:
   save_confusion_matrix: true
 
 output:
-  result_dir: results/deepsleepnet_sleep_edf_paper_fpz_cz
+  result_dir: results/deepsleepnet_sleep_edf_paper_fpz_cz_eeg_eog_quality_generator_v2_p05

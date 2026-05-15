@@ -27,6 +27,8 @@ def build_parser() -> argparse.ArgumentParser:
     preprocess_parser.add_argument("--epoch-seconds", type=int, default=30, help="epoch length in seconds")
     # --channel: 显式指定要抽取的 EEG 通道，用于对齐论文里的 Fpz-Cz 或 Pz-Oz。
     preprocess_parser.add_argument("--channel", choices=["Fpz-Cz", "Pz-Oz"], default=None, help="optional EEG channel")
+    preprocess_parser.add_argument("--include-eog", action="store_true", help="also export the default EOG channel")
+    preprocess_parser.add_argument("--eog-channel", default=None, help="optional EOG channel name")
     # --trim-wake-minutes: 仅保留睡眠段前后多少分钟的清醒 W；论文 Sleep-EDF 常用 30。
     preprocess_parser.add_argument("--trim-wake-minutes", type=int, default=0, help="keep only edge wake minutes")
 
@@ -97,6 +99,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_stage1_parser.add_argument("--output-dir", default="results/deepsleepnet_baseline/stage1", help="stage-1 output directory")
     # --epochs: 可选覆盖配置文件中的训练轮数。
     train_stage1_parser.add_argument("--epochs", type=int, default=None, help="optional override for epochs")
+    train_stage1_parser.add_argument("--eog-dropout-prob", type=float, default=0.0, help="randomly zero EOG during training")
+    train_stage1_parser.add_argument("--eog-channel-index", type=int, default=1, help="channel index used by EOG dropout")
 
     train_stage2_parser = subparsers.add_parser("train-stage2", help="fine-tune the stage-2 DeepSleepNet")
     # --config: stage2 训练配置文件路径。
@@ -115,6 +119,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_stage2_parser.add_argument("--output-dir", default="results/deepsleepnet_baseline/stage2", help="stage-2 output directory")
     # --epochs: 可选覆盖 stage2 的训练轮数。
     train_stage2_parser.add_argument("--epochs", type=int, default=None, help="optional override for stage-2 epochs")
+    train_stage2_parser.add_argument("--eog-dropout-prob", type=float, default=0.0, help="randomly zero EOG during training")
+    train_stage2_parser.add_argument("--eog-channel-index", type=int, default=1, help="channel index used by EOG dropout")
 
     evaluate_parser = subparsers.add_parser("evaluate-stage2", help="evaluate a trained stage-2 model")
     # --config: 评估时使用的配置文件路径。
@@ -129,6 +135,8 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--subset", choices=["train", "val", "test"], default="test", help="which subset to evaluate")
     # --output-dir: 评估结果保存目录，里面会写 summary 和混淆矩阵。
     evaluate_parser.add_argument("--output-dir", default=None, help="directory used to save evaluation artifacts")
+    evaluate_parser.add_argument("--mask-eog", action="store_true", help="zero out the EOG channel during evaluation")
+    evaluate_parser.add_argument("--eog-channel-index", type=int, default=1, help="channel index used by --mask-eog")
 
     inspect_model_parser = subparsers.add_parser("inspect-model", help="inspect model forward passes")
     # --manifest: 预处理后的样本索引文件。
@@ -197,6 +205,10 @@ def _handle_preprocess(args) -> None:
     ]
     if args.channel is not None:
         cli_args.extend(["--channel", args.channel])
+    if args.include_eog:
+        cli_args.append("--include-eog")
+    if args.eog_channel is not None:
+        cli_args.extend(["--eog-channel", args.eog_channel])
     if args.trim_wake_minutes > 0:
         cli_args.extend(["--trim-wake-minutes", str(args.trim_wake_minutes)])
     sys.argv = cli_args
@@ -238,7 +250,7 @@ def _handle_inspect_dataset(args) -> None:
     print(f"- subject: {sample['subject_id']}")
     print(f"- epoch index: {sample['epoch_index']}")
     print(f"- label: {sample['label_name']} ({sample['label']})")
-    print(f"- signal length: {len(sample['signal'])}")
+    print(f"- signal shape: {tuple(sample['signal'].shape)}")
 
     batch = next(iter(create_dataloader(dataset, batch_size=args.batch_size)))
     print("first batch:")
@@ -286,6 +298,8 @@ def _handle_train_stage1(args) -> None:
         split_path=args.split,
         output_dir=args.output_dir,
         epochs_override=args.epochs,
+        eog_dropout_prob=args.eog_dropout_prob,
+        eog_channel_index=args.eog_channel_index,
     )
     _print_training_summary("stage-1 training finished", summary, summary_path)
 
@@ -298,6 +312,8 @@ def _handle_train_stage2(args) -> None:
         stage1_checkpoint_path=args.stage1_checkpoint,
         output_dir=args.output_dir,
         epochs_override=args.epochs,
+        eog_dropout_prob=args.eog_dropout_prob,
+        eog_channel_index=args.eog_channel_index,
     )
     _print_training_summary("stage-2 training finished", summary, summary_path)
 
@@ -310,6 +326,8 @@ def _handle_evaluate_stage2(args) -> None:
         checkpoint_path=args.checkpoint,
         subset=args.subset,
         output_dir=args.output_dir,
+        mask_eog=args.mask_eog,
+        eog_channel_index=args.eog_channel_index,
     )
 
     print("stage-2 evaluation finished")
@@ -336,7 +354,12 @@ def _handle_inspect_model(args) -> None:
     import torch
 
     epoch_batch = next(iter(create_dataloader(SleepEDFEpochDataset(args.manifest), batch_size=args.batch_size)))
-    feature_model = DeepFeatureNet(input_size=epoch_batch["signals"].shape[-1], n_classes=5)
+    input_channels = epoch_batch["signals"].shape[1] if epoch_batch["signals"].ndim == 3 else 1
+    feature_model = DeepFeatureNet(
+        input_size=epoch_batch["signals"].shape[-1],
+        input_channels=input_channels,
+        n_classes=5,
+    )
     feature_model.eval()
     with torch.no_grad():
         feature_logits = feature_model(epoch_batch["signals"])
@@ -353,6 +376,7 @@ def _handle_inspect_model(args) -> None:
     )
     sequence_model = DeepSleepNet(
         input_size=sequence_batch["signals"].shape[-1],
+        input_channels=sequence_batch["signals"].shape[2] if sequence_batch["signals"].ndim == 4 else 1,
         n_classes=5,
         seq_length=args.sequence_length,
         n_rnn_layers=2,

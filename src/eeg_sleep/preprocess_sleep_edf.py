@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
-# Sleep-EDF 常见 5 分类映射。
+# Sleep-EDF 常用的 5 分类映射。
 STAGE_LABEL_MAP = {
     "Sleep stage W": "W",
     "Sleep stage 1": "N1",
@@ -44,8 +44,9 @@ class EpochSample:
     start_second: float
     label: str
     n_samples: int
-    channel_name: str
     relative_data_path: str
+    channel_name: str | None = None
+    channel_names: list[str] | None = None
     participant_id: str | None = None
 
 
@@ -85,31 +86,67 @@ def find_sleep_edf_pairs(input_dir: Path) -> list[RecordPair]:
 
 
 def infer_participant_id(subject_id: str) -> str:
-    """Sleep-EDF 里同一受试者的两晚记录通常只在最后一位不同。"""
+    """Sleep-EDF 中同一受试者的两晚记录通常只在最后一位不同。"""
 
     if len(subject_id) >= 2 and subject_id[:2] in {"SC", "ST"} and subject_id[-1].isdigit():
         return subject_id[:-1]
     return subject_id
 
 
-def _normalize_channel_name(channel_name: str) -> str:
-    return channel_name if channel_name.startswith("EEG ") else f"EEG {channel_name}"
+def _build_channel_candidates(channel_name: str, prefixes: tuple[str, ...]) -> list[str]:
+    """兼容用户传入带前缀或不带前缀的通道名。"""
+
+    normalized_name = channel_name.strip()
+    candidates = [normalized_name]
+    for prefix in prefixes:
+        if normalized_name.startswith(prefix):
+            continue
+        candidates.append(f"{prefix}{normalized_name}")
+    return candidates
+
+
+def _resolve_named_channel(
+    channel_names: list[str],
+    preferred_channel: str,
+    prefixes: tuple[str, ...],
+) -> str:
+    """在 EDF 的通道列表中解析用户指定的目标通道。"""
+
+    for candidate in _build_channel_candidates(preferred_channel, prefixes):
+        if candidate in channel_names:
+            return candidate
+    raise ValueError("未找到指定通道：" + preferred_channel)
 
 
 def choose_eeg_channel(channel_names: list[str], preferred_channel: str | None = None) -> str:
-    """优先选择论文和官方数据里最常见的两个 EEG 通道。"""
+    """优先选择论文里常见的 EEG 通道。"""
 
     if preferred_channel is not None:
-        normalized_channel = _normalize_channel_name(preferred_channel)
-        if normalized_channel not in channel_names:
-            raise ValueError("未找到指定 EEG 通道：" + normalized_channel)
-        return normalized_channel
+        return _resolve_named_channel(channel_names, preferred_channel, prefixes=("EEG ",))
 
-    for channel_name in ["EEG Fpz-Cz", "EEG Pz-Oz"]:
+    for channel_name in ["EEG Fpz-Cz", "EEG Pz-Oz", "Fpz-Cz", "Pz-Oz"]:
         if channel_name in channel_names:
             return channel_name
 
     raise ValueError("未找到常见单通道 EEG。当前通道列表：" + ", ".join(channel_names))
+
+
+def choose_eog_channel(channel_names: list[str], preferred_channel: str | None = None) -> str:
+    """优先选择 Sleep-EDF 中常见的水平眼电通道。"""
+
+    if preferred_channel is not None:
+        return _resolve_named_channel(channel_names, preferred_channel, prefixes=("EOG ",))
+
+    for channel_name in [
+        "EOG horizontal",
+        "EOG Horizontal",
+        "EOG HORIZONTAL",
+        "Horizontal EOG",
+    ]:
+        if channel_name in channel_names:
+            return channel_name
+
+    raise ValueError("未找到常见 EOG 通道。当前通道列表：" + ", ".join(channel_names))
 
 
 def build_epoch_labels(
@@ -117,7 +154,7 @@ def build_epoch_labels(
     epoch_seconds: int,
     max_second: float | None = None,
 ) -> list[tuple[float, str]]:
-    """把区间标注展开成固定长度 epoch 标注。"""
+    """把区间标注展开成固定长度的 epoch 标签。"""
 
     epoch_labels: list[tuple[float, str]] = []
 
@@ -142,7 +179,7 @@ def build_epoch_labels(
 
 
 def trim_edge_wake_epochs(epoch_labels: list[tuple[float, str]], wake_minutes: int) -> list[tuple[float, str]]:
-    """只保留睡眠段前后指定分钟数的清醒 W，内部的 W 不受影响。"""
+    """只保留睡眠段前后指定分钟数的清醒 W。"""
 
     if wake_minutes <= 0 or not epoch_labels:
         return epoch_labels
@@ -158,14 +195,15 @@ def trim_edge_wake_epochs(epoch_labels: list[tuple[float, str]], wake_minutes: i
     return epoch_labels[start_index:end_index]
 
 
-def extract_epoch_array(raw, channel_name: str, start_second: float, epoch_seconds: int):
-    """从原始 PSG 中裁出单个 epoch 的单通道 EEG。"""
+def extract_epoch_array(raw, channel_names: list[str], start_second: float, epoch_seconds: int):
+    """从原始 PSG 裁出单个 epoch 的一个或多个通道。"""
 
-    segment = raw.copy().pick([channel_name]).crop(
+    segment = raw.copy().pick(channel_names).crop(
         tmin=start_second,
         tmax=start_second + epoch_seconds - 1.0 / raw.info["sfreq"],
     )
-    return segment.get_data()[0]
+    data = segment.get_data()
+    return data[0] if len(channel_names) == 1 else data
 
 
 def process_record_pair(
@@ -173,15 +211,24 @@ def process_record_pair(
     output_dir: Path,
     epoch_seconds: int,
     preferred_channel: str | None = None,
+    preferred_eog_channel: str | None = None,
+    include_eog: bool = False,
     trim_wake_minutes: int = 0,
 ) -> tuple[list[EpochSample], Counter]:
-    """处理一组 PSG/Hypnogram，保存 epoch 并返回索引信息。"""
+    """处理一组 PSG/Hypnogram，并保存 epoch 与 manifest 信息。"""
 
     mne, np = _lazy_import_dependencies()
 
     raw = mne.io.read_raw_edf(pair.psg_path, preload=False, verbose="ERROR")
     annotations = mne.read_annotations(pair.hypnogram_path)
-    channel_name = choose_eeg_channel(raw.ch_names, preferred_channel=preferred_channel)
+
+    eeg_channel_name = choose_eeg_channel(raw.ch_names, preferred_channel=preferred_channel)
+    selected_channel_names = [eeg_channel_name]
+    if include_eog:
+        selected_channel_names.append(
+            choose_eog_channel(raw.ch_names, preferred_channel=preferred_eog_channel)
+        )
+
     max_second = float(raw.times[-1] + 1.0 / raw.info["sfreq"])
     participant_id = infer_participant_id(pair.subject_id)
 
@@ -195,7 +242,7 @@ def process_record_pair(
     epoch_labels = trim_edge_wake_epochs(epoch_labels, trim_wake_minutes)
 
     for epoch_index, (start_second, label) in enumerate(epoch_labels):
-        data = extract_epoch_array(raw, channel_name, start_second, epoch_seconds)
+        data = extract_epoch_array(raw, selected_channel_names, start_second, epoch_seconds)
         save_path = subject_output_dir / f"epoch_{epoch_index:05d}_{label}.npy"
         np.save(save_path, data.astype(np.float32))
 
@@ -205,8 +252,11 @@ def process_record_pair(
                 epoch_index=epoch_index,
                 start_second=start_second,
                 label=label,
-                n_samples=int(data.shape[0]),
-                channel_name=channel_name,
+                n_samples=int(data.shape[-1]),
+                # 旧代码如果只读 channel_name，仍然能看到一个可读字符串。
+                channel_name=" + ".join(selected_channel_names),
+                # 新代码优先读完整的 channel_names，区分单通道和双通道。
+                channel_names=selected_channel_names,
                 # manifest 里统一使用 /，避免跨平台路径问题。
                 relative_data_path=save_path.relative_to(output_dir.parent).as_posix(),
                 participant_id=participant_id,
@@ -237,6 +287,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default="data/processed/sleep_edf_subset", help="预处理输出目录")
     parser.add_argument("--epoch-seconds", type=int, default=DEFAULT_EPOCH_SECONDS, help="epoch 长度，默认 30 秒")
     parser.add_argument("--channel", choices=["Fpz-Cz", "Pz-Oz"], default=None, help="显式指定 EEG 通道")
+    parser.add_argument("--include-eog", action="store_true", help="同时导出 EEG + EOG 双通道 epoch")
+    parser.add_argument("--eog-channel", default=None, help="显式指定 EOG 通道名称")
     parser.add_argument("--trim-wake-minutes", type=int, default=0, help="仅保留睡眠前后多少分钟的清醒 W")
     return parser
 
@@ -263,6 +315,8 @@ def main() -> None:
             output_dir,
             args.epoch_seconds,
             preferred_channel=args.channel,
+            preferred_eog_channel=args.eog_channel,
+            include_eog=args.include_eog,
             trim_wake_minutes=args.trim_wake_minutes,
         )
         all_samples.extend(samples)

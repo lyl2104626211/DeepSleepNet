@@ -1,0 +1,101 @@
+对话导出
+日期：2026-04-21
+目录：C:\Users\21046\Desktop\EEG_SLEEP
+
+主题：论文版 fold_00 结果确认、20-fold 分批推进、服务器数据恢复与 conda 环境整理
+
+本轮主线：
+- 用户确认论文版 `fold_00` 已完成训练和测试评估。
+- 用户决定继续保留 `20-fold cross-validation` 协议，但按服务器时长分批跑，而不是一次性跑满全部折。
+- 用户在服务器上尝试批量生成和训练后续折，过程中遇到了：
+  - 工作目录错误
+  - 缺失 `.npy` 数据文件
+  - `stage2_epochs` 与预期不一致
+  - `conda activate` 失败
+- 需要把这些信息同步回项目文档与历史记录。
+
+本轮确认的重要结果：
+- 本地已确认 `fold_00` 完整产物存在：
+  - `results/deepsleepnet_sleep_edf_paper_fpz_cz/fold_00/stage1/training_summary.json`
+  - `results/deepsleepnet_sleep_edf_paper_fpz_cz/fold_00/stage1/best_model.pt`
+  - `results/deepsleepnet_sleep_edf_paper_fpz_cz/fold_00/stage2/training_summary.json`
+  - `results/deepsleepnet_sleep_edf_paper_fpz_cz/fold_00/stage2/best_model.pt`
+  - `results/deepsleepnet_sleep_edf_paper_fpz_cz/fold_00/eval_test/evaluation_test.json`
+  - `results/deepsleepnet_sleep_edf_paper_fpz_cz/fold_00/eval_test/confusion_matrix_test.json`
+- `fold_00` 当前测试指标为：
+  - `accuracy = 0.8536492890995261`
+  - `macro_f1 = 0.7906429258163258`
+  - `cohen_kappa = 0.789305566970348`
+  - `loss = 0.7997137787503291`
+
+对这些结果的判断：
+- 单折结果已经证明论文版流程是通的。
+- 作为第一折探路实验，这个结果是可信且值得继续扩展的。
+- 但它仍然只是单折结果，不能直接当成最终论文对齐结论。
+
+围绕 20 折推进做出的决定：
+- 不改协议，仍然做 `20-fold cross-validation`。
+- 训练任务拆成两批或多批完成，而不是一次性全部跑完。
+- 已完成的折不需要重跑；如果手动中断，只从中断折继续。
+- 每一折都需要自己的 `fold_xx.json`，因为 `fold-index` 不同时，测试被试集合不同。
+
+服务器上实际发生的问题与对应结论：
+- 一次批量运行时在 `/workspace` 下执行，导致程序去找：
+  - `/workspace/main.py`
+  - `/workspace/data/...`
+  而不是项目目录 `/workspace/EGGSLEEP`。
+- 修正后确认必须在项目根目录执行命令。
+- 后续训练中出现：
+  - `FileNotFoundError: data/processed/sleep_edf_paper_fpz_cz/SC4632/epoch_00062_N1.npy`
+- 这说明 `manifest.json` 和实际处理后数据目录不一致，更可能是处理后数据迁移/解压不完整。
+- 最稳妥的修复方案是删除服务器上的旧 `sleep_edf_paper_fpz_cz` 目录，再从压缩包重新解压。
+
+围绕 epoch 设置澄清的信息：
+- 用户本来希望服务器资源紧张时，把每折 `stage2` 只跑 `100 epochs`。
+- 但从配置截图看，服务器上的 `configs/paper_sleep_edf_fpz_cz.yaml` 里：
+  - `epochs: 100`
+  - `stage2_epochs: 200`
+- 因此批量脚本中：
+  - `stage1` 会跑 100 epoch
+  - `stage2` 仍然会跑 200 epoch
+- 如果后续想统一按 100 epoch 跑 `stage2`，必须显式修改：
+  - `stage2_epochs: 100`
+- 最重要的是保持所有剩余折使用同一套 `stage2` epoch 口径。
+
+围绕训练中断与评估的结论：
+- 当前实现中，若没有验证集，`stage2` 会在每个完整 epoch 结束后刷新 `best_model.pt`。
+- 因此如果在某个 epoch 中途手动停止，仍然可以直接评估上一个完整 epoch 保存下来的 checkpoint。
+- 这意味着用户不需要因为手动中断就重头训练整折。
+
+conda 环境相关结论：
+- 服务器镜像展示的 `CUDA 11.3` 本身足够跑这个项目。
+- 但镜像自带的 `Python 3.8 / PyTorch 1.11` 偏旧，不建议直接裸跑项目。
+- 更稳的方式是在镜像里重新建 `conda` 环境。
+- `conda activate eggsleep` 报错：
+  - `CondaError: Run 'conda init' before 'conda activate'`
+  实际是因为 shell 还没有重新加载。
+- 当前最稳的激活方式是：
+  - `source /root/miniconda3/etc/profile.d/conda.sh`
+  - `conda activate eggsleep`
+
+本轮形成的服务器最小依赖结论：
+- 项目最小核心依赖为：
+  - `torch`
+  - `numpy`
+  - `PyYAML`
+  - `scikit-learn`
+  - `tqdm`
+  - `mne`
+- 推荐在 conda 环境中安装后，再执行：
+  - `pip install -e .`
+
+本轮结束时的项目状态：
+- fixed-split baseline 仍然是完整可用的正式基线。
+- 论文版 `fold_00` 已完整完成并得到正式测试结果。
+- 服务器侧正在继续推进后续折，但过程受资源和数据一致性问题影响。
+- 下一步最重要的不是重新讨论单折结果，而是：
+  - 统一剩余折的 `stage2` epoch 设置
+  - 补齐 `fold_14` 到 `fold_19` 的 split 文件
+  - 保证数据目录完整
+  - 分批跑完剩余折
+  - 最后汇总 `20-fold` 平均结果

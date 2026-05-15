@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 
 
 DEFAULT_SLEEP_CASSETTE_URL = "https://physionet.org/files/sleep-edfx/1.0.0/sleep-cassette/"
@@ -237,13 +237,19 @@ def _try_domestic_mirror(
     if overwrite or not archive_path.exists():
         _download_to_path(domestic_mirror_url, archive_path, "download domestic Sleep-EDF mirror")
 
-    return _extract_domestic_archive(
-        archive_path=archive_path,
-        output_dir=output_dir,
-        record_prefix=record_prefix,
-        max_records=max_records,
-        overwrite=overwrite,
-    )
+    try:
+        return _extract_domestic_archive(
+            archive_path=archive_path,
+            output_dir=output_dir,
+            record_prefix=record_prefix,
+            max_records=max_records,
+            overwrite=overwrite,
+        )
+    except BadZipFile as error:
+        # 国内镜像偶尔会返回错误页而不是 zip，这里删掉坏文件，让外层自动回退。
+        if archive_path.exists():
+            archive_path.unlink()
+        raise RuntimeError(f"domestic archive is invalid: {archive_path}") from error
 
 
 def download_sleep_cassette(
@@ -280,7 +286,8 @@ def download_sleep_cassette(
                 overwrite=overwrite,
                 domestic_mirror_url=domestic_mirror_url,
             )
-        except RuntimeError:
+        except RuntimeError as error:
+            print(f"[download-sleep-edf] domestic mirror unavailable, fallback to per-file download: {error}")
             pass
 
     output_path.mkdir(parents=True, exist_ok=True)
