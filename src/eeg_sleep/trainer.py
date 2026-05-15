@@ -109,7 +109,7 @@ def train_stage1(
     best_macro_f1 = float("-inf")
 
     for epoch in range(1, total_epochs + 1):
-        train_loss = _train_stage1_one_epoch(
+        train_losses = _train_stage1_one_epoch(
             model,
             train_loader,
             criterion,
@@ -121,7 +121,9 @@ def train_stage1(
         )
         epoch_log = {
             "epoch": epoch,
-            "train_loss": train_loss,
+            "train_loss": train_losses["loss"],
+            "train_ce_loss": train_losses["ce_loss"],
+            "train_generator_loss": train_losses["auxiliary_loss"],
             "val_loss": None,
             "accuracy": None,
             "macro_f1": None,
@@ -256,7 +258,7 @@ def train_stage2(
     best_macro_f1 = float("-inf")
 
     for epoch in range(1, total_epochs + 1):
-        train_loss = _train_stage2_one_epoch(
+        train_losses = _train_stage2_one_epoch(
             model=model,
             dataloader=train_loader,
             criterion=criterion,
@@ -269,7 +271,9 @@ def train_stage2(
         )
         epoch_log = {
             "epoch": epoch,
-            "train_loss": train_loss,
+            "train_loss": train_losses["loss"],
+            "train_ce_loss": train_losses["ce_loss"],
+            "train_generator_loss": train_losses["auxiliary_loss"],
             "val_loss": None,
             "accuracy": None,
             "macro_f1": None,
@@ -849,11 +853,13 @@ def _train_stage1_one_epoch(
     epoch: int,
     eog_dropout_prob: float = 0.0,
     eog_channel_index: int = 1,
-) -> float:
-    """执行一轮 stage1 训练，并返回样本级平均 loss。"""
+) -> dict[str, float]:
+    """执行一轮 stage1 训练，并返回样本级平均 loss 分解。"""
 
     model.train()
     total_loss = 0.0
+    total_ce_loss = 0.0
+    total_auxiliary_loss = 0.0
     total_samples = 0
 
     progress = _make_progress(dataloader, len(dataloader), f"Epoch {epoch} [train]")
@@ -865,7 +871,8 @@ def _train_stage1_one_epoch(
 
         optimizer.zero_grad()
         logits, auxiliary_loss = _unpack_model_output(model(signals))
-        loss = criterion(logits, labels)
+        ce_loss = criterion(logits, labels)
+        loss = ce_loss
         if auxiliary_loss is not None:
             loss = loss + auxiliary_loss
         loss.backward()
@@ -873,12 +880,24 @@ def _train_stage1_one_epoch(
 
         batch_size = labels.shape[0]
         total_loss += float(loss.item()) * batch_size
+        total_ce_loss += float(ce_loss.item()) * batch_size
+        if auxiliary_loss is not None:
+            total_auxiliary_loss += float(auxiliary_loss.item()) * batch_size
         total_samples += batch_size
 
         if hasattr(progress, "set_postfix"):
-            progress.set_postfix(loss=f"{total_loss / max(total_samples, 1):.4f}")
+            progress.set_postfix(
+                loss=f"{total_loss / max(total_samples, 1):.4f}",
+                ce=f"{total_ce_loss / max(total_samples, 1):.4f}",
+                gen=f"{total_auxiliary_loss / max(total_samples, 1):.4f}",
+            )
 
-    return total_loss / max(total_samples, 1)
+    denominator = max(total_samples, 1)
+    return {
+        "loss": total_loss / denominator,
+        "ce_loss": total_ce_loss / denominator,
+        "auxiliary_loss": total_auxiliary_loss / denominator,
+    }
 
 
 def _train_stage2_one_epoch(
@@ -891,12 +910,14 @@ def _train_stage2_one_epoch(
     clip_norm: float | None,
     eog_dropout_prob: float = 0.0,
     eog_channel_index: int = 1,
-) -> float:
-    """执行一轮 stage2 训练，并返回 token 级平均 loss。"""
+) -> dict[str, float]:
+    """执行一轮 stage2 训练，并返回 token 级平均 loss 分解。"""
 
     torch, _, _ = _require_torch()
     model.train()
     total_loss = 0.0
+    total_ce_loss = 0.0
+    total_auxiliary_loss = 0.0
     total_tokens = 0
 
     progress = _make_progress(dataloader, len(dataloader), f"Epoch {epoch} [stage2-train]")
@@ -908,7 +929,8 @@ def _train_stage2_one_epoch(
 
         optimizer.zero_grad()
         logits, auxiliary_loss = _unpack_model_output(model(signals))
-        loss = criterion(logits.reshape(-1, logits.shape[-1]), labels.reshape(-1))
+        ce_loss = criterion(logits.reshape(-1, logits.shape[-1]), labels.reshape(-1))
+        loss = ce_loss
         if auxiliary_loss is not None:
             loss = loss + auxiliary_loss
         loss.backward()
@@ -920,12 +942,24 @@ def _train_stage2_one_epoch(
 
         token_count = int(labels.numel())
         total_loss += float(loss.item()) * token_count
+        total_ce_loss += float(ce_loss.item()) * token_count
+        if auxiliary_loss is not None:
+            total_auxiliary_loss += float(auxiliary_loss.item()) * token_count
         total_tokens += token_count
 
         if hasattr(progress, "set_postfix"):
-            progress.set_postfix(loss=f"{total_loss / max(total_tokens, 1):.4f}")
+            progress.set_postfix(
+                loss=f"{total_loss / max(total_tokens, 1):.4f}",
+                ce=f"{total_ce_loss / max(total_tokens, 1):.4f}",
+                gen=f"{total_auxiliary_loss / max(total_tokens, 1):.4f}",
+            )
 
-    return total_loss / max(total_tokens, 1)
+    denominator = max(total_tokens, 1)
+    return {
+        "loss": total_loss / denominator,
+        "ce_loss": total_ce_loss / denominator,
+        "auxiliary_loss": total_auxiliary_loss / denominator,
+    }
 
 
 def _evaluate_epoch_model(model, dataloader, criterion, device, description: str) -> dict:
@@ -1075,11 +1109,18 @@ def _print_stage1_epoch(epoch_log: dict, epoch: int, total_epochs: int) -> None:
     """打印 stage1 每轮训练摘要。"""
 
     if epoch_log["val_loss"] is None:
-        print(f"第 {epoch}/{total_epochs} 轮完成：train_loss={epoch_log['train_loss']:.6f}")
+        print(
+            f"第 {epoch}/{total_epochs} 轮完成："
+            f"train_loss={epoch_log['train_loss']:.6f}, "
+            f"train_ce_loss={epoch_log['train_ce_loss']:.6f}, "
+            f"train_generator_loss={epoch_log['train_generator_loss']:.6f}"
+        )
         return
     print(
         f"第 {epoch}/{total_epochs} 轮完成："
         f" train_loss={epoch_log['train_loss']:.6f},"
+        f" train_ce_loss={epoch_log['train_ce_loss']:.6f},"
+        f" train_generator_loss={epoch_log['train_generator_loss']:.6f},"
         f" val_loss={epoch_log['val_loss']:.6f},"
         f" val_acc={epoch_log['accuracy']:.6f},"
         f" val_macro_f1={epoch_log['macro_f1']:.6f},"
@@ -1091,11 +1132,18 @@ def _print_stage2_epoch(epoch_log: dict, epoch: int, total_epochs: int) -> None:
     """打印 stage2 每轮训练摘要。"""
 
     if epoch_log["val_loss"] is None:
-        print(f"第 {epoch}/{total_epochs} 轮第二阶段完成：train_loss={epoch_log['train_loss']:.6f}")
+        print(
+            f"第 {epoch}/{total_epochs} 轮第二阶段完成："
+            f"train_loss={epoch_log['train_loss']:.6f}, "
+            f"train_ce_loss={epoch_log['train_ce_loss']:.6f}, "
+            f"train_generator_loss={epoch_log['train_generator_loss']:.6f}"
+        )
         return
     print(
         f"第 {epoch}/{total_epochs} 轮第二阶段完成："
         f" train_loss={epoch_log['train_loss']:.6f},"
+        f" train_ce_loss={epoch_log['train_ce_loss']:.6f},"
+        f" train_generator_loss={epoch_log['train_generator_loss']:.6f},"
         f" val_loss={epoch_log['val_loss']:.6f},"
         f" val_acc={epoch_log['accuracy']:.6f},"
         f" val_macro_f1={epoch_log['macro_f1']:.6f},"

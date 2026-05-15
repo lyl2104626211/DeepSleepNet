@@ -53,7 +53,7 @@ class ResidualEOGGenerator(nn.Module):
     away from the sleep-staging objective.
     """
 
-    def __init__(self, feature_dim: int, dropout: float = 0.1, residual_logit_init: float = -4.0) -> None:
+    def __init__(self, feature_dim: int, dropout: float = 0.1, residual_logit_init: float = -1.0) -> None:
         super().__init__()
         self.base = nn.Linear(feature_dim, feature_dim)
         self.norm = nn.LayerNorm(feature_dim)
@@ -78,7 +78,7 @@ class ResidualQualityFusion(nn.Module):
     a randomly initialized high-dimensional fusion layer.
     """
 
-    def __init__(self, feature_dim: int, dropout: float = 0.1, residual_logit_init: float = -10.0) -> None:
+    def __init__(self, feature_dim: int, dropout: float = 0.1, residual_logit_init: float = -2.0) -> None:
         super().__init__()
         fusion_dim = feature_dim * 2 + 1
         self.delta = nn.Sequential(
